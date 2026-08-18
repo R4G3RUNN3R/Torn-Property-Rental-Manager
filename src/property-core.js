@@ -10,6 +10,22 @@
     return Number.isInteger(number) && number > 0 ? number : 0;
   }
 
+  function asNonNegativeNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  }
+
+  function normalizePerson(value) {
+    if (!value || typeof value !== 'object') return null;
+    const id = asPositiveInt(value.id);
+    const name = typeof value.name === 'string' ? value.name.trim() : '';
+    if (!id && !name) return null;
+    const person = {};
+    if (id) person.id = id;
+    if (name) person.name = name;
+    return person;
+  }
+
   function normalizeModifications(value) {
     if (!Array.isArray(value)) return [];
     return [...new Set(value
@@ -47,6 +63,15 @@
       happy: Number(raw.happy != null ? raw.happy : property.happy != null ? property.happy : 0) || 0,
       status: normalizeStatus(raw.status),
       modifications: normalizeModifications(raw.modifications),
+      cost: asNonNegativeNumber(raw.cost),
+      costPerDay: asNonNegativeNumber(raw.cost_per_day != null ? raw.cost_per_day : raw.costPerDay),
+      rentalPeriod: asNonNegativeNumber(raw.rental_period != null ? raw.rental_period : raw.rentalPeriod),
+      rentalPeriodRemaining: asNonNegativeNumber(
+        raw.rental_period_remaining != null ? raw.rental_period_remaining : raw.rentalPeriodRemaining
+      ),
+      rentedBy: normalizePerson(raw.rented_by != null ? raw.rented_by : raw.rentedBy),
+      renterAsked: normalizePerson(raw.renter_asked != null ? raw.renter_asked : raw.renterAsked),
+      leaseExtension: raw.lease_extension != null ? raw.lease_extension : raw.leaseExtension != null ? raw.leaseExtension : null,
       raw
     };
   }

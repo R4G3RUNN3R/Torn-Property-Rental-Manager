@@ -9,6 +9,9 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -21,5 +24,20 @@ jobs:
           node-version: '20.20.2'
       - name: Install dependencies
         run: npm install --no-audit --no-fund
+      - name: Build userscript
+        run: npm run build
       - name: Run tests
         run: npm test
+      - name: Syntax checks
+        run: npm run check
+      - name: Commit generated userscript
+        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/initial-implementation'
+        run: |
+          if git diff --quiet -- R4G3RUNN3R-Property-Rental-Manager.user.js; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add R4G3RUNN3R-Property-Rental-Manager.user.js
+          git commit -m "build: refresh generated userscript"
+          git push origin HEAD:feature/initial-implementation

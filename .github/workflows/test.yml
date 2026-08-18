@@ -10,36 +10,23 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout implementation head
+      - name: Checkout
         uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - name: Set up Node 20
         uses: actions/setup-node@v4
         with:
           node-version: '20.20.2'
-      - name: Install dependencies
-        run: npm install --no-audit --no-fund
-      - name: Build userscript
-        run: npm run build
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
       - name: Run tests
         run: npm test
       - name: Syntax checks
         run: npm run check
-      - name: Commit generated artifacts
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
-        run: |
-          if [ -z "$(git status --porcelain -- package-lock.json R4G3RUNN3R-Property-Rental-Manager.user.js)" ]; then
-            exit 0
-          fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package-lock.json R4G3RUNN3R-Property-Rental-Manager.user.js
-          git commit -m "build: refresh release artifacts"
-          git push origin HEAD:feature/initial-implementation
+      - name: Verify generated userscript is current
+        run: npm run build:check

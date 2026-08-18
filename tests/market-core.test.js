@@ -72,7 +72,8 @@ test('removes extreme outliers and applies undercut with median floor', () => {
 
 test('median safety floor prevents pathological underpricing', () => {
   const owned = { happy: 4500, modifications: [] };
-  const listings = [10, 100, 101, 102, 103, 104, 105].map((price, i) => ({
+  // Two low listings keep the floor inside the Tukey fence while the market median stays high.
+  const listings = [10, 10, 101, 102, 103, 104, 105].map((price, i) => ({
     id: i + 1,
     happy: 4500,
     modifications: [],
@@ -84,6 +85,7 @@ test('median safety floor prevents pathological underpricing', () => {
     minimumMedianRatio: 0.70
   });
 
+  assert.equal(stats.marketFloor, 10);
   assert.equal(stats.median, 102);
   assert.equal(stats.suggestedDaily, 71);
 });

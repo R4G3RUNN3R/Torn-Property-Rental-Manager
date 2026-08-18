@@ -74,6 +74,23 @@ test('uses Authorization header and never puts API key in URL', async () => {
   assert.equal(calls[0].init.headers.Authorization, 'ApiKey secret-key');
 });
 
+test('requests only properties owned by the API key owner', async () => {
+  const calls = [];
+  const client = ApiCore.createClient({
+    apiKey: 'k',
+    fetchImpl: async url => {
+      calls.push(url);
+      return okJson({ properties: [] });
+    },
+    scheduler: { run: fn => fn() }
+  });
+
+  await client.fetchOwnedProperties();
+  const url = new URL(calls[0]);
+  assert.equal(url.searchParams.get('filters'), 'ownedByUser');
+  assert.equal(url.searchParams.get('limit'), '100');
+});
+
 test('follows valid api.torn.com pagination and rejects foreign continuation URLs', async () => {
   const calls = [];
   const responses = [

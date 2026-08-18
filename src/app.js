@@ -39,7 +39,7 @@
   function normalizeSettings(value) {
     const source = value && typeof value === 'object' ? value : {};
     return {
-      apiKey: typeof source.apiKey === 'string' ? source.apiKey : DEFAULT_SETTINGS.apiKey,
+      apiKey: typeof source.apiKey === 'string' ? source.apiKey.trim() : DEFAULT_SETTINGS.apiKey,
       theme: source.theme === 'light' ? 'light' : 'dark',
       mode: source.mode === 'advanced' ? 'advanced' : 'simple',
       days: integer(source.days, 1, 365, DEFAULT_SETTINGS.days),
@@ -104,7 +104,8 @@
     const windowLike = config.window;
     const documentLike = config.document;
     const storage = config.storage || windowLike && windowLike.localStorage;
-    const apiClient = config.apiClient;
+    const fixedApiClient = config.apiClient || null;
+    const apiClientFactory = typeof config.apiClientFactory === 'function' ? config.apiClientFactory : null;
     const propertyCore = config.propertyCore;
     const marketCore = config.marketCore;
     const draftStore = config.draftStore;
@@ -113,8 +114,9 @@
       : url => { if (windowLike && windowLike.location) windowLike.location.href = url; };
 
     if (!windowLike || !documentLike) throw new TypeError('window and document are required');
-    if (!apiClient || typeof apiClient.fetchOwnedProperties !== 'function' || typeof apiClient.scanMarkets !== 'function') {
-      throw new TypeError('apiClient is required');
+    if (!fixedApiClient && !apiClientFactory) throw new TypeError('apiClient or apiClientFactory is required');
+    if (fixedApiClient && (typeof fixedApiClient.fetchOwnedProperties !== 'function' || typeof fixedApiClient.scanMarkets !== 'function')) {
+      throw new TypeError('apiClient is invalid');
     }
     if (!propertyCore || !marketCore || !draftStore) throw new TypeError('Core dependencies are required');
 
@@ -124,15 +126,29 @@
       markets: {},
       rows: [],
       loading: false,
-      error: null
+      error: null,
+      needsApiKey: false
     };
     let panel = null;
     let dragCleanup = null;
     let resizeObserver = null;
+    let settingsOpen = false;
 
     function persistSettings(patch) {
       settings = saveSettings(storage, Object.assign({}, settings, patch || {}));
       return settings;
+    }
+
+    function getApiClient() {
+      if (apiClientFactory) {
+        if (!settings.apiKey) return null;
+        const client = apiClientFactory(settings.apiKey);
+        if (!client || typeof client.fetchOwnedProperties !== 'function' || typeof client.scanMarkets !== 'function') {
+          throw new TypeError('apiClientFactory returned an invalid client');
+        }
+        return client;
+      }
+      return fixedApiClient;
     }
 
     function computeRows(properties, markets) {
@@ -160,6 +176,8 @@
       node.style.resize = 'both';
       node.style.overflow = 'auto';
       node.style.zIndex = '99999';
+      node.style.maxWidth = 'calc(100vw - 16px)';
+      node.style.maxHeight = 'calc(100vh - 16px)';
     }
 
     function addStyles(node) {
@@ -207,10 +225,76 @@
       dragHandle.style.color = settings.theme === 'light' ? '#102513' : '#74ff8b';
       header.appendChild(dragHandle);
 
+      const settingsButton = createButton(settingsOpen ? 'Close Settings' : 'Settings', 'toggle-settings');
       const modeButton = createButton(settings.mode === 'advanced' ? 'Simple' : 'Advanced', 'toggle-mode');
       const themeButton = createButton(settings.theme === 'dark' ? 'Light' : 'Dark', 'toggle-theme');
-      header.append(modeButton, themeButton);
+      header.append(settingsButton, modeButton, themeButton);
       container.appendChild(header);
+    }
+
+    function renderSettings(container) {
+      if (!settingsOpen) return;
+      const box = el(documentLike, 'section', { className: 'r4g3-prm-settings' });
+      box.style.padding = '10px';
+      box.style.margin = '8px';
+      box.style.border = '1px solid rgba(128,128,128,0.35)';
+      box.style.borderRadius = '8px';
+      box.style.display = 'grid';
+      box.style.gridTemplateColumns = 'repeat(auto-fit, minmax(180px, 1fr))';
+      box.style.gap = '10px';
+
+      const keyWrap = el(documentLike, 'label', { text: settings.apiKey ? 'Torn API key (saved): ' : 'Torn API key: ' });
+      const keyInput = el(documentLike, 'input', {
+        attrs: {
+          type: 'password',
+          'data-role': 'api-key-input',
+          autocomplete: 'off',
+          placeholder: settings.apiKey ? 'Enter replacement key' : 'Limited-or-higher API key'
+        }
+      });
+      keyInput.value = '';
+      keyWrap.appendChild(keyInput);
+      box.appendChild(keyWrap);
+
+      const daysWrap = el(documentLike, 'label', { text: 'Default lease days: ' });
+      const daysInput = el(documentLike, 'input', {
+        attrs: { type: 'number', min: '1', max: '365', 'data-role': 'days-input' }
+      });
+      daysInput.value = String(settings.days);
+      daysWrap.appendChild(daysInput);
+      box.appendChild(daysWrap);
+
+      const undercutWrap = el(documentLike, 'label', { text: 'Undercut %: ' });
+      const undercutInput = el(documentLike, 'input', {
+        attrs: { type: 'number', min: '0', max: '25', step: '0.1', 'data-role': 'undercut-input' }
+      });
+      undercutInput.value = String(settings.undercutPercent);
+      undercutWrap.appendChild(undercutInput);
+      box.appendChild(undercutWrap);
+
+      const ratioWrap = el(documentLike, 'label', { text: 'Median safety ratio: ' });
+      const ratioInput = el(documentLike, 'input', {
+        attrs: { type: 'number', min: '0', max: '1', step: '0.01', 'data-role': 'median-ratio-input' }
+      });
+      ratioInput.value = String(settings.minimumMedianRatio);
+      ratioWrap.appendChild(ratioInput);
+      box.appendChild(ratioWrap);
+
+      const actions = el(documentLike, 'div');
+      actions.style.gridColumn = '1 / -1';
+      actions.style.display = 'flex';
+      actions.style.gap = '8px';
+      actions.appendChild(createButton('Save Settings', 'save-settings'));
+      if (settings.apiKey) actions.appendChild(createButton('Clear API Key', 'clear-api-key'));
+      box.appendChild(actions);
+
+      const note = el(documentLike, 'small', {
+        text: 'Saved API keys are never rendered back into this page. Replacing a key requires entering it again.'
+      });
+      note.style.gridColumn = '1 / -1';
+      note.style.opacity = '0.72';
+      box.appendChild(note);
+      container.appendChild(box);
     }
 
     function addCell(row, label, value, className) {
@@ -270,6 +354,14 @@
     }
 
     function renderStatus(container) {
+      if (state.needsApiKey) {
+        const keyMessage = el(documentLike, 'div', {
+          text: 'A Limited-or-higher Torn API key is required. Open Settings to configure it.'
+        });
+        keyMessage.style.padding = '14px';
+        container.appendChild(keyMessage);
+        return true;
+      }
       if (state.loading) {
         const loading = el(documentLike, 'div', { text: 'Scanning owned properties and rental markets…' });
         loading.style.padding = '14px';
@@ -291,6 +383,19 @@
       return false;
     }
 
+    function readSettingsFields(node) {
+      const keyInput = node.querySelector('[data-role="api-key-input"]');
+      const daysInput = node.querySelector('[data-role="days-input"]');
+      const undercutInput = node.querySelector('[data-role="undercut-input"]');
+      const ratioInput = node.querySelector('[data-role="median-ratio-input"]');
+      return {
+        apiKey: keyInput && keyInput.value ? keyInput.value.trim() : null,
+        days: daysInput ? daysInput.value : settings.days,
+        undercutPercent: undercutInput ? undercutInput.value : settings.undercutPercent,
+        minimumMedianRatio: ratioInput ? ratioInput.value : settings.minimumMedianRatio
+      };
+    }
+
     function attachPanelEvents(node) {
       node.addEventListener('click', event => {
         const button = event.target && event.target.closest && event.target.closest('[data-action]');
@@ -302,6 +407,28 @@
         }
         if (action === 'toggle-theme') {
           setTheme(settings.theme === 'dark' ? 'light' : 'dark');
+          return;
+        }
+        if (action === 'toggle-settings') {
+          settingsOpen = !settingsOpen;
+          render();
+          return;
+        }
+        if (action === 'save-settings') {
+          const fields = readSettingsFields(node);
+          const patch = {
+            days: fields.days,
+            undercutPercent: fields.undercutPercent,
+            minimumMedianRatio: fields.minimumMedianRatio
+          };
+          if (fields.apiKey) patch.apiKey = fields.apiKey;
+          persistSettings(patch);
+          state.rows = computeRows(state.properties, state.markets);
+          render();
+          return;
+        }
+        if (action === 'clear-api-key') {
+          setApiKey('');
           return;
         }
         if (action === 'prepare-lease') {
@@ -379,6 +506,7 @@
       applyPanelGeometry(panel);
       addStyles(panel);
       renderHeader(panel);
+      renderSettings(panel);
 
       const body = el(documentLike, 'div', { className: 'r4g3-prm-body' });
       if (!renderStatus(body)) {
@@ -393,18 +521,33 @@
     }
 
     async function load(options) {
-      state = Object.assign({}, state, { loading: true, error: null });
+      if (apiClientFactory && !settings.apiKey) {
+        settingsOpen = true;
+        state = {
+          properties: [],
+          markets: {},
+          rows: [],
+          loading: false,
+          error: null,
+          needsApiKey: true
+        };
+        render();
+        return state;
+      }
+
+      const apiClient = getApiClient();
+      state = Object.assign({}, state, { loading: true, error: null, needsApiKey: false });
       render();
       try {
         const rawProperties = await apiClient.fetchOwnedProperties();
         const properties = propertyCore.normalizeProperties(rawProperties, null);
         const markets = await apiClient.scanMarkets(properties, { force: Boolean(options && options.force) });
         const rows = computeRows(properties, markets);
-        state = { properties, markets, rows, loading: false, error: null };
+        state = { properties, markets, rows, loading: false, error: null, needsApiKey: false };
         render();
         return state;
       } catch (error) {
-        state = Object.assign({}, state, { loading: false, error: error || new Error('Unknown load failure') });
+        state = Object.assign({}, state, { loading: false, error: error || new Error('Unknown load failure'), needsApiKey: false });
         render();
         throw error;
       }
@@ -440,6 +583,20 @@
       return settings.theme;
     }
 
+    function openSettings() {
+      settingsOpen = true;
+      render();
+      return true;
+    }
+
+    function setApiKey(apiKey) {
+      persistSettings({ apiKey: String(apiKey || '').trim() });
+      state = Object.assign({}, state, { needsApiKey: apiClientFactory ? !settings.apiKey : false, error: null });
+      settingsOpen = true;
+      render();
+      return Boolean(settings.apiKey);
+    }
+
     function destroy() {
       if (dragCleanup) dragCleanup();
       if (resizeObserver) resizeObserver.disconnect();
@@ -455,6 +612,8 @@
       prepareLease,
       setMode,
       setTheme,
+      openSettings,
+      setApiKey,
       destroy,
       getState: () => state,
       getSettings: () => Object.assign({}, settings, { geometry: Object.assign({}, settings.geometry) })

@@ -24,9 +24,9 @@ jobs:
           node-version: '20.20.2'
       - name: Install dependencies
         run: npm install --no-audit --no-fund
-      - name: Verify generated userscript is current
-        run: npm run build:check
       - name: Run tests
         run: npm test
       - name: Syntax checks
         run: npm run check
+      - name: Verify generated userscript is current
+        run: npm run build:check

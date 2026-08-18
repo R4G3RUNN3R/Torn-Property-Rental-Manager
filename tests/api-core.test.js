@@ -1,0 +1,208 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const ApiCore = require('../src/api-core');
+
+function okJson(body, status = 200) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async json() { return body; }
+  };
+}
+
+function memoryStorage() {
+  const map = new Map();
+  return {
+    getItem(key) { return map.has(key) ? map.get(key) : null; },
+    setItem(key, value) { map.set(key, String(value)); },
+    removeItem(key) { map.delete(key); }
+  };
+}
+
+test('scheduler enforces minimum spacing between request starts', async () => {
+  let clock = 0;
+  const starts = [];
+  const scheduler = ApiCore.createScheduler({
+    minGapMs: 800,
+    maxPerMinute: 75,
+    now: () => clock,
+    sleep: async ms => { clock += ms; }
+  });
+
+  await scheduler.run(async () => { starts.push(clock); });
+  await scheduler.run(async () => { starts.push(clock); });
+  await scheduler.run(async () => { starts.push(clock); });
+
+  assert.deepEqual(starts, [0, 800, 1600]);
+});
+
+test('scheduler enforces rolling request cap', async () => {
+  let clock = 0;
+  const starts = [];
+  const scheduler = ApiCore.createScheduler({
+    minGapMs: 0,
+    maxPerMinute: 3,
+    now: () => clock,
+    sleep: async ms => { clock += ms; }
+  });
+
+  for (let i = 0; i < 4; i += 1) {
+    await scheduler.run(async () => { starts.push(clock); });
+  }
+
+  assert.deepEqual(starts.slice(0, 3), [0, 0, 0]);
+  assert.ok(starts[3] >= 60000, String(starts[3]));
+});
+
+test('uses Authorization header and never puts API key in URL', async () => {
+  const calls = [];
+  const client = ApiCore.createClient({
+    apiKey: 'secret-key',
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      return okJson({ properties: [] });
+    },
+    scheduler: { run: fn => fn() }
+  });
+
+  await client.fetchOwnedProperties();
+
+  assert.match(calls[0].url, /^https:\/\/api\.torn\.com\/v2\/user\/properties/);
+  assert.equal(calls[0].url.includes('secret-key'), false);
+  assert.equal(calls[0].init.headers.Authorization, 'ApiKey secret-key');
+});
+
+test('requests only properties owned by the API key owner', async () => {
+  const calls = [];
+  const client = ApiCore.createClient({
+    apiKey: 'k',
+    fetchImpl: async url => {
+      calls.push(url);
+      return okJson({ properties: [] });
+    },
+    scheduler: { run: fn => fn() }
+  });
+
+  await client.fetchOwnedProperties();
+  const url = new URL(calls[0]);
+  assert.equal(url.searchParams.get('filters'), 'ownedByUser');
+  assert.equal(url.searchParams.get('limit'), '100');
+});
+
+test('follows valid api.torn.com pagination and rejects foreign continuation URLs', async () => {
+  const calls = [];
+  const responses = [
+    okJson({
+      properties: [{ id: 1 }],
+      _metadata: { links: { next: 'https://api.torn.com/v2/user/properties?offset=100' } }
+    }),
+    okJson({
+      properties: [{ id: 2 }],
+      _metadata: { links: { next: 'https://evil.example/steal' } }
+    })
+  ];
+
+  const client = ApiCore.createClient({
+    apiKey: 'k',
+    fetchImpl: async url => {
+      calls.push(url);
+      return responses.shift();
+    },
+    scheduler: { run: fn => fn() }
+  });
+
+  await assert.rejects(() => client.fetchOwnedProperties(), /continuation/i);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1], 'https://api.torn.com/v2/user/properties?offset=100');
+});
+
+test('collects paginated property rows', async () => {
+  const responses = [
+    okJson({
+      properties: [{ id: 1 }],
+      metadata: { links: { next: '/v2/user/properties?offset=100' } }
+    }),
+    okJson({ properties: [{ id: 2 }] })
+  ];
+
+  const client = ApiCore.createClient({
+    apiKey: 'k',
+    fetchImpl: async () => responses.shift(),
+    scheduler: { run: fn => fn() }
+  });
+
+  const rows = await client.fetchOwnedProperties();
+  assert.deepEqual(rows.map(row => row.id), [1, 2]);
+});
+
+test('deduplicates property types during market scan', async () => {
+  const calls = [];
+  const client = ApiCore.createClient({
+    apiKey: 'k',
+    fetchImpl: async url => {
+      const match = url.match(/\/market\/(\d+)\/rentals/);
+      if (match) calls.push(Number(match[1]));
+      return okJson({ rentals: [] });
+    },
+    scheduler: { run: fn => fn() },
+    storage: memoryStorage()
+  });
+
+  await client.scanMarkets([
+    { propertyTypeId: 13 },
+    { propertyTypeId: 13 },
+    { propertyTypeId: 10 },
+    { propertyTypeId: 0 }
+  ]);
+
+  assert.deepEqual(calls.sort((a, b) => a - b), [10, 13]);
+});
+
+test('reuses fresh rental cache and force bypasses it', async () => {
+  let clock = 1_000_000;
+  let fetches = 0;
+  const storage = memoryStorage();
+  const client = ApiCore.createClient({
+    apiKey: 'k',
+    now: () => clock,
+    storage,
+    fetchImpl: async () => {
+      fetches += 1;
+      return okJson({
+        rentals: [{ id: fetches, cost_per_day: 100 }],
+        rentals_timestamp: 123,
+        rentals_delay: 900
+      });
+    },
+    scheduler: { run: fn => fn() }
+  });
+
+  const first = await client.fetchRentalMarket(13);
+  clock += 60_000;
+  const cached = await client.fetchRentalMarket(13);
+  const forced = await client.fetchRentalMarket(13, { force: true });
+
+  assert.equal(fetches, 2);
+  assert.equal(first.rentals[0].id, 1);
+  assert.equal(cached.rentals[0].id, 1);
+  assert.equal(forced.rentals[0].id, 2);
+});
+
+test('redacts API key from thrown errors', async () => {
+  const client = ApiCore.createClient({
+    apiKey: 'super-secret',
+    fetchImpl: async () => okJson({ error: { code: 2, error: 'Bad key super-secret' } }, 401),
+    scheduler: { run: fn => fn() }
+  });
+
+  await assert.rejects(
+    () => client.fetchOwnedProperties(),
+    error => {
+      assert.equal(String(error.message).includes('super-secret'), false);
+      assert.match(error.message, /\[REDACTED\]/);
+      return true;
+    }
+  );
+});

@@ -1,0 +1,19 @@
+{
+  "name": "torn-property-rental-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Standalone Torn property rental market scanner and lease preparation userscript",
+  "scripts": {
+    "build": "node scripts/build-userscript.js",
+    "build:check": "node scripts/build-userscript.js --check",
+    "test": "node --test tests/*.test.js",
+    "check": "node --check src/*.js scripts/build-userscript.js R4G3RUNN3R-Property-Rental-Manager.user.js",
+    "verify": "npm run build:check && npm test && npm run check"
+  },
+  "devDependencies": {
+    "jsdom": "29.1.1"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  }
+}

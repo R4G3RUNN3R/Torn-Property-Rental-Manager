@@ -238,7 +238,7 @@
     }
 
     async function fetchOwnedProperties() {
-      const result = await collectPages(`${API_BASE}/user/properties?limit=100`, 'properties');
+      const result = await collectPages(`${API_BASE}/user/properties?filters=ownedByUser&limit=100`, 'properties');
       return result.rows;
     }
 

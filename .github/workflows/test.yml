@@ -18,6 +18,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - name: Set up Node 20
         uses: actions/setup-node@v4
         with:
@@ -31,7 +33,7 @@ jobs:
       - name: Syntax checks
         run: npm run check
       - name: Commit generated userscript
-        if: github.event_name == 'push' && github.ref == 'refs/heads/feature/initial-implementation'
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         run: |
           if git diff --quiet -- R4G3RUNN3R-Property-Rental-Manager.user.js; then
             exit 0

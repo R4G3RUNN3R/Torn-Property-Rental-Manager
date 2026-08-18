@@ -23,6 +23,22 @@
     return Number.isInteger(number) && number > 0 ? number : 0;
   }
 
+  function asNonNegativeNumber(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  }
+
+  function normalizePerson(value) {
+    if (!value || typeof value !== 'object') return null;
+    const id = asPositiveInt(value.id);
+    const name = typeof value.name === 'string' ? value.name.trim() : '';
+    if (!id && !name) return null;
+    const person = {};
+    if (id) person.id = id;
+    if (name) person.name = name;
+    return person;
+  }
+
   function normalizeModifications(value) {
     if (!Array.isArray(value)) return [];
     return [...new Set(value
@@ -60,6 +76,15 @@
       happy: Number(raw.happy != null ? raw.happy : property.happy != null ? property.happy : 0) || 0,
       status: normalizeStatus(raw.status),
       modifications: normalizeModifications(raw.modifications),
+      cost: asNonNegativeNumber(raw.cost),
+      costPerDay: asNonNegativeNumber(raw.cost_per_day != null ? raw.cost_per_day : raw.costPerDay),
+      rentalPeriod: asNonNegativeNumber(raw.rental_period != null ? raw.rental_period : raw.rentalPeriod),
+      rentalPeriodRemaining: asNonNegativeNumber(
+        raw.rental_period_remaining != null ? raw.rental_period_remaining : raw.rentalPeriodRemaining
+      ),
+      rentedBy: normalizePerson(raw.rented_by != null ? raw.rented_by : raw.rentedBy),
+      renterAsked: normalizePerson(raw.renter_asked != null ? raw.renter_asked : raw.renterAsked),
+      leaseExtension: raw.lease_extension != null ? raw.lease_extension : raw.leaseExtension != null ? raw.leaseExtension : null,
       raw
     };
   }
@@ -517,7 +542,7 @@
     }
 
     async function fetchOwnedProperties() {
-      const result = await collectPages(`${API_BASE}/user/properties?limit=100`, 'properties');
+      const result = await collectPages(`${API_BASE}/user/properties?filters=ownedByUser&limit=100`, 'properties');
       return result.rows;
     }
 
@@ -825,6 +850,7 @@
   'use strict';
 
   const SETTINGS_KEY = 'r4g3_property_rental_manager.settings';
+  const MOBILE_BREAKPOINT = 700;
   const DEFAULT_SETTINGS = Object.freeze({
     apiKey: '',
     theme: 'dark',
@@ -843,6 +869,11 @@
 
   function integer(value, min, max, fallback) {
     return Math.round(clamp(value, min, max, fallback));
+  }
+
+  function positiveInteger(value) {
+    const number = Number(value);
+    return Number.isInteger(number) && number > 0 ? number : 0;
   }
 
   function normalizeGeometry(value) {
@@ -905,6 +936,14 @@
     return text ? text.replace(/\b\w/g, char => char.toUpperCase()) : 'Unknown';
   }
 
+  function personLabel(person) {
+    if (!person || typeof person !== 'object') return 'n/a';
+    if (person.name && person.id) return `${person.name} [${person.id}]`;
+    if (person.name) return person.name;
+    if (person.id) return `#${person.id}`;
+    return 'n/a';
+  }
+
   function el(documentLike, tag, options) {
     const node = documentLike.createElement(tag);
     const config = options || {};
@@ -948,10 +987,15 @@
       error: null,
       needsApiKey: false
     };
+    const priceOverrides = new Map();
     let panel = null;
     let dragCleanup = null;
     let resizeObserver = null;
     let settingsOpen = false;
+
+    function isMobile() {
+      return Number(windowLike.innerWidth) <= MOBILE_BREAKPOINT;
+    }
 
     function persistSettings(patch) {
       settings = saveSettings(storage, Object.assign({}, settings, patch || {}));
@@ -985,18 +1029,34 @@
       });
     }
 
+    function effectiveDailyPrice(entry) {
+      const override = positiveInteger(priceOverrides.get(entry.property.id));
+      if (override) return override;
+      return positiveInteger(entry.stats.suggestedDaily) || null;
+    }
+
     function applyPanelGeometry(node) {
-      const geometry = settings.geometry;
       node.style.position = 'fixed';
+      node.style.overflow = 'auto';
+      node.style.zIndex = '99999';
+      node.style.maxWidth = 'calc(100vw - 16px)';
+      node.style.maxHeight = 'calc(100vh - 16px)';
+
+      if (isMobile()) {
+        node.style.left = '8px';
+        node.style.top = '8px';
+        node.style.width = 'calc(100vw - 16px)';
+        node.style.height = 'calc(100vh - 16px)';
+        node.style.resize = 'none';
+        return;
+      }
+
+      const geometry = settings.geometry;
       node.style.left = `${geometry.left}px`;
       node.style.top = `${geometry.top}px`;
       node.style.width = `${geometry.width}px`;
       node.style.height = `${geometry.height}px`;
       node.style.resize = 'both';
-      node.style.overflow = 'auto';
-      node.style.zIndex = '99999';
-      node.style.maxWidth = 'calc(100vw - 16px)';
-      node.style.maxHeight = 'calc(100vh - 16px)';
     }
 
     function addStyles(node) {
@@ -1026,6 +1086,7 @@
       const header = el(documentLike, 'div', { className: 'r4g3-prm-header' });
       header.style.display = 'flex';
       header.style.alignItems = 'center';
+      header.style.flexWrap = 'wrap';
       header.style.gap = '8px';
       header.style.padding = '9px 10px';
       header.style.borderBottom = '1px solid rgba(128,128,128,0.35)';
@@ -1038,16 +1099,18 @@
         text: 'Property Rental Manager',
         attrs: { 'data-role': 'drag-handle' }
       });
-      dragHandle.style.cursor = 'move';
+      dragHandle.style.cursor = isMobile() ? 'default' : 'move';
       dragHandle.style.userSelect = 'none';
       dragHandle.style.marginRight = 'auto';
       dragHandle.style.color = settings.theme === 'light' ? '#102513' : '#74ff8b';
       header.appendChild(dragHandle);
 
+      const refreshButton = createButton(state.loading ? 'Scanning…' : 'Refresh', 'refresh');
+      refreshButton.disabled = Boolean(state.loading);
       const settingsButton = createButton(settingsOpen ? 'Close Settings' : 'Settings', 'toggle-settings');
       const modeButton = createButton(settings.mode === 'advanced' ? 'Simple' : 'Advanced', 'toggle-mode');
       const themeButton = createButton(settings.theme === 'dark' ? 'Light' : 'Dark', 'toggle-theme');
-      header.append(settingsButton, modeButton, themeButton);
+      header.append(refreshButton, settingsButton, modeButton, themeButton);
       container.appendChild(header);
     }
 
@@ -1116,8 +1179,9 @@
       container.appendChild(box);
     }
 
-    function addCell(row, label, value, className) {
+    function addCell(row, label, value, className, role) {
       const cell = el(documentLike, 'div', { className: className || '' });
+      if (role) cell.dataset.role = role;
       const heading = el(documentLike, 'span', { text: `${label}: ` });
       heading.style.opacity = '0.68';
       cell.appendChild(heading);
@@ -1126,8 +1190,42 @@
       return cell;
     }
 
+    function renderPriceOverride(entry, row) {
+      if (settings.mode !== 'advanced' || !propertyCore.isEligibleForLease(entry.property) || entry.stats.suggestedDaily == null) return;
+      const wrap = el(documentLike, 'label', { className: 'r4g3-prm-advanced', text: 'Daily price override: ' });
+      const input = el(documentLike, 'input', {
+        attrs: {
+          type: 'number',
+          min: '1',
+          step: '1',
+          'data-role': 'daily-price-override',
+          'data-property-id': entry.property.id
+        }
+      });
+      input.value = String(effectiveDailyPrice(entry));
+      input.style.width = '120px';
+      wrap.appendChild(input);
+      row.appendChild(wrap);
+    }
+
+    function renderStatusDetails(property, row) {
+      if (settings.mode !== 'advanced') return;
+      if (property.status === 'rented') {
+        addCell(row, 'Current rent / day', property.costPerDay == null ? 'n/a' : `$${money(property.costPerDay)}`, 'r4g3-prm-advanced');
+        addCell(row, 'Rental period', property.rentalPeriod == null ? 'n/a' : `${money(property.rentalPeriod)} days`, 'r4g3-prm-advanced');
+        addCell(row, 'Remaining', property.rentalPeriodRemaining == null ? 'n/a' : `${money(property.rentalPeriodRemaining)} days`, 'r4g3-prm-advanced');
+        addCell(row, 'Rented by', personLabel(property.rentedBy), 'r4g3-prm-advanced');
+      }
+      if (property.status === 'for_rent') {
+        addCell(row, 'Current asking / day', property.costPerDay == null ? 'n/a' : `$${money(property.costPerDay)}`, 'r4g3-prm-advanced');
+        addCell(row, 'Listing period', property.rentalPeriod == null ? 'n/a' : `${money(property.rentalPeriod)} days`, 'r4g3-prm-advanced');
+        if (property.renterAsked) addCell(row, 'Interested renter', personLabel(property.renterAsked), 'r4g3-prm-advanced');
+      }
+    }
+
     function renderRow(entry, container) {
       const { property, market, stats } = entry;
+      const daily = effectiveDailyPrice(entry);
       const row = el(documentLike, 'section', {
         className: 'r4g3-prm-property',
         attrs: { 'data-property-id': property.id }
@@ -1148,7 +1246,7 @@
       addCell(row, 'Market floor / day', stats.marketFloor == null ? 'No market data' : `$${money(stats.marketFloor)}`);
       addCell(row, 'Suggested / day', stats.suggestedDaily == null ? 'n/a' : `$${money(stats.suggestedDaily)}`);
       addCell(row, 'Lease period', `${settings.days} days`);
-      addCell(row, 'Total lease value', stats.suggestedDaily == null ? 'n/a' : `$${money(stats.suggestedDaily * settings.days)}`);
+      addCell(row, 'Total lease value', daily == null ? 'n/a' : `$${money(daily * settings.days)}`, '', 'total-value');
       addCell(row, 'Confidence', stats.confidence);
 
       if (settings.mode === 'advanced') {
@@ -1162,7 +1260,10 @@
         addCell(row, 'Market source', market && market.fromCache ? 'Cache' : 'API', 'r4g3-prm-advanced');
       }
 
-      if (propertyCore.isEligibleForLease(property) && stats.suggestedDaily != null) {
+      renderStatusDetails(property, row);
+      renderPriceOverride(entry, row);
+
+      if (propertyCore.isEligibleForLease(property) && daily != null) {
         const action = createButton('Prepare Lease', 'prepare-lease');
         action.dataset.propertyId = String(property.id);
         action.style.color = settings.theme === 'light' ? '#0d5c19' : '#74ff8b';
@@ -1215,11 +1316,38 @@
       };
     }
 
+    function updateOverrideFromInput(input) {
+      const propertyId = positiveInteger(input && input.dataset && input.dataset.propertyId);
+      if (!propertyId) return;
+      const value = positiveInteger(input.value);
+      if (value) priceOverrides.set(propertyId, value);
+      else priceOverrides.delete(propertyId);
+
+      const entry = state.rows.find(row => row.property.id === propertyId);
+      const propertyRow = input.closest('[data-property-id]');
+      const total = propertyRow && propertyRow.querySelector('[data-role="total-value"]');
+      if (entry && total) {
+        const daily = effectiveDailyPrice(entry);
+        total.textContent = `Total lease value: ${daily == null ? 'n/a' : `$${money(daily * settings.days)}`}`;
+      }
+    }
+
     function attachPanelEvents(node) {
+      node.addEventListener('change', event => {
+        const input = event.target;
+        if (input && input.matches && input.matches('[data-role="daily-price-override"]')) {
+          updateOverrideFromInput(input);
+        }
+      });
+
       node.addEventListener('click', event => {
         const button = event.target && event.target.closest && event.target.closest('[data-action]');
         if (!button || !node.contains(button)) return;
         const action = button.dataset.action;
+        if (action === 'refresh') {
+          load({ force: true }).catch(() => {});
+          return;
+        }
         if (action === 'toggle-mode') {
           setMode(settings.mode === 'advanced' ? 'simple' : 'advanced');
           return;
@@ -1257,6 +1385,7 @@
     }
 
     function attachDrag(node) {
+      if (isMobile()) return;
       const handle = node.querySelector('[data-role="drag-handle"]');
       if (!handle) return;
       let dragging = false;
@@ -1296,7 +1425,7 @@
     }
 
     function persistGeometryFromPanel() {
-      if (!panel) return;
+      if (!panel || isMobile()) return;
       const geometry = {
         left: parseInt(panel.style.left, 10) || 0,
         top: parseInt(panel.style.top, 10) || 0,
@@ -1307,6 +1436,7 @@
     }
 
     function attachResize(node) {
+      if (isMobile()) return;
       if (windowLike.ResizeObserver) {
         resizeObserver = new windowLike.ResizeObserver(() => persistGeometryFromPanel());
         resizeObserver.observe(node);
@@ -1375,12 +1505,13 @@
     function prepareLease(propertyId) {
       const id = Number(propertyId);
       const entry = state.rows.find(row => row.property.id === id);
-      if (!entry || !propertyCore.isEligibleForLease(entry.property) || entry.stats.suggestedDaily == null) return false;
+      const dailyPrice = entry ? effectiveDailyPrice(entry) : null;
+      if (!entry || !propertyCore.isEligibleForLease(entry.property) || dailyPrice == null) return false;
 
       draftStore.save({
         propertyId: id,
         days: settings.days,
-        dailyPrice: entry.stats.suggestedDaily,
+        dailyPrice,
         marketFloor: entry.stats.marketFloor,
         median: entry.stats.median,
         confidence: entry.stats.confidence

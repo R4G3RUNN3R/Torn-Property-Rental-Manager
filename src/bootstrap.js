@@ -63,6 +63,7 @@
     const windowLike = config.window;
     const documentLike = config.document;
     const draftStore = config.draftStore;
+    const onPrepared = typeof config.onPrepared === 'function' ? config.onPrepared : () => {};
     let observer = null;
     let timeoutId = null;
 
@@ -93,8 +94,8 @@
         draft
       });
       if (result.prepared) {
-        draftStore.clear();
         stop();
+        onPrepared(result, draft);
       }
       return result;
     }
@@ -121,6 +122,50 @@
     });
   }
 
+  function createLeaseLister(options) {
+    const config = options || {};
+    const windowLike = config.window;
+    const documentLike = config.document;
+    const draftStore = config.draftStore;
+    const onListed = typeof config.onListed === 'function' ? config.onListed : () => {};
+
+    function canList(propertyId) {
+      const id = Number(propertyId);
+      const routeId = R4G3FormCore.parseLeasePropertyId(windowLike && windowLike.location);
+      if (!Number.isInteger(id) || id <= 0 || routeId !== id) return false;
+      const draft = draftStore.loadFor(id);
+      if (!draft) return false;
+      const form = R4G3FormCore.findLeaseForm(documentLike);
+      if (!form) return false;
+      const submit = R4G3FormCore.findLeaseSubmitButton(documentLike, form.root);
+      if (!submit) return false;
+      if (submit.disabled) return false;
+      if (submit.getAttribute && submit.getAttribute('aria-disabled') === 'true') return false;
+      return true;
+    }
+
+    function list(propertyId) {
+      const id = Number(propertyId);
+      if (!canList(id)) return { submitted: false, reason: 'Matching prepared lease form is not ready' };
+      const draft = draftStore.loadFor(id);
+      if (!draft) return { submitted: false, reason: 'No pending lease draft' };
+
+      const result = R4G3FormCore.submitLeaseFromUserGesture({
+        document: documentLike,
+        window: windowLike,
+        location: windowLike.location,
+        draft
+      });
+      if (result.submitted) {
+        draftStore.clear();
+        onListed(result, draft);
+      }
+      return result;
+    }
+
+    return Object.freeze({ canList, list });
+  }
+
   function start(windowLike) {
     const win = windowLike || root;
     if (!win || !win.document || !win.location) return null;
@@ -128,13 +173,22 @@
 
     const draftStore = R4G3DraftCore.createStore(win.sessionStorage);
     const apiFetch = createApiFetch(win);
+    let controller = null;
     const leasePreparer = createLeasePreparer({
+      window: win,
+      document: win.document,
+      draftStore,
+      onPrepared() {
+        if (controller) controller.render();
+      }
+    });
+    const leaseLister = createLeaseLister({
       window: win,
       document: win.document,
       draftStore
     });
 
-    const controller = R4G3PropertyRentalApp.createController({
+    controller = R4G3PropertyRentalApp.createController({
       window: win,
       document: win.document,
       storage: win.localStorage,
@@ -150,10 +204,19 @@
       },
       navigate(url) {
         win.location.href = url;
+      },
+      canListProperty(propertyId) {
+        return leaseLister.canList(propertyId);
+      },
+      listProperty(propertyId) {
+        return leaseLister.list(propertyId);
       }
     });
 
-    const onHashChange = () => leasePreparer.prepareWithWait();
+    const onHashChange = () => {
+      leasePreparer.prepareWithWait();
+      controller.render();
+    };
     win.addEventListener('hashchange', onHashChange);
     leasePreparer.prepareWithWait();
     controller.load().catch(() => {
@@ -163,6 +226,7 @@
     return Object.freeze({
       controller,
       leasePreparer,
+      leaseLister,
       destroy() {
         win.removeEventListener('hashchange', onHashChange);
         leasePreparer.stop();
@@ -175,6 +239,7 @@
     assertApiUrl,
     createApiFetch,
     createLeasePreparer,
+    createLeaseLister,
     start
   });
 }));

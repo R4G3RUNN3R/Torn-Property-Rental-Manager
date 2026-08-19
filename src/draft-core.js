@@ -42,17 +42,20 @@
       const source = draft && typeof draft === 'object' ? draft : {};
       const propertyId = positiveInteger(source.propertyId);
       const days = positiveInteger(source.days);
-      const dailyPrice = positiveInteger(source.dailyPrice);
+      const suppliedDailyPrice = positiveInteger(source.dailyPrice);
+      const suppliedTotalCost = positiveInteger(source.totalCost);
 
       if (!propertyId) throw new TypeError('A positive property ID is required');
       if (!days || days > 365) throw new RangeError('Lease days must be an integer from 1 to 365');
-      if (!dailyPrice) throw new RangeError('Daily price must be a positive integer');
+      if (!suppliedDailyPrice && !suppliedTotalCost) throw new RangeError('Daily price or total cost must be a positive integer');
 
+      const totalCost = suppliedTotalCost || days * suppliedDailyPrice;
+      const dailyPrice = suppliedDailyPrice || Math.max(1, Math.floor(totalCost / days));
       const normalized = {
         propertyId,
         days,
         dailyPrice,
-        totalCost: days * dailyPrice,
+        totalCost,
         createdAt: Number.isFinite(Number(createdAt)) ? Number(createdAt) : now()
       };
 

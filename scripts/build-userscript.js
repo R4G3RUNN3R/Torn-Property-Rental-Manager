@@ -22,7 +22,7 @@ function metadata() {
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
 // @version      ${packageJson.version}
-// @description  Scan owned Torn properties, compare rental listings, and safely prepare native lease forms.
+// @description  Price owned Torn rentals from exact market matches and list them through an explicit two-click workflow.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
 // @grant        GM_xmlhttpRequest

@@ -24,81 +24,49 @@ function makeDom(width = 1024) {
   return dom;
 }
 
-function rows() {
-  return [
-    {
-      id: 101,
-      property: { id: 13, name: 'Private Island' },
-      owner: { id: 3877028 },
-      happy: 4500,
-      status: 'none',
-      modifications: []
-    },
-    {
-      id: 102,
-      property: { id: 13, name: 'Private Island' },
-      owner: { id: 3877028 },
-      happy: 4500,
-      status: 'rented',
-      modifications: [],
-      cost: 90_000_000,
-      cost_per_day: 3_000_000,
-      rental_period: 30,
-      rental_period_remaining: 12,
-      rented_by: { id: 99, name: 'Tenant' }
-    },
-    {
-      id: 103,
-      property: { id: 13, name: 'Private Island' },
-      owner: { id: 3877028 },
-      happy: 4500,
-      status: 'for_rent',
-      modifications: [],
-      cost: 84_000_000,
-      cost_per_day: 2_800_000,
-      rental_period: 30,
-      renter_asked: { id: 77, name: 'Applicant' }
-    }
-  ];
+function ownedRows() {
+  return [{
+    id: 101,
+    property: { id: 13, name: 'Private Island' },
+    owner: { id: 3877028 },
+    happy: 4500,
+    status: 'none',
+    modifications: []
+  }];
 }
 
 function rentals() {
-  return Array.from({ length: 8 }, (_, i) => ({
-    id: i + 1,
-    happy: 4500,
-    modifications: [],
-    cost_per_day: 2_500_000 + i * 10_000
-  }));
+  return [
+    { modifications: [], cost: 90_000, rental_period: 30, cost_per_day: 3000 },
+    { modifications: [], cost: 210_000, rental_period: 60, cost_per_day: 3500 },
+    { modifications: [], cost: 400_000, rental_period: 100, cost_per_day: 4000 }
+  ];
 }
 
 function makeController(options = {}) {
   const dom = makeDom(options.width || 1024);
   const scanOptions = [];
-  const savedDrafts = [];
-  const navigations = [];
+  const storage = options.storage || memoryStorage();
   const apiClient = {
-    async fetchOwnedProperties() { return rows(); },
+    async fetchOwnedProperties() { return ownedRows(); },
     async scanMarkets(_properties, optionsArg) {
       scanOptions.push(optionsArg || {});
       return { 13: { rentals: rentals(), rentals_timestamp: 123, fromCache: false } };
     }
   };
-  const draftStore = {
-    save(draft) { savedDrafts.push(draft); return draft; },
-    loadFor() { return null; },
-    clear() {}
-  };
   const controller = App.createController({
     window: dom.window,
     document: dom.window.document,
-    storage: memoryStorage(),
+    storage,
     apiClient,
     propertyCore: PropertyCore,
     marketCore: MarketCore,
-    draftStore,
-    navigate(url) { navigations.push(url); }
+    draftStore: { save(d) { return d; }, loadFor() { return null; }, clear() {} },
+    navigate() {},
+    canListProperty() { return false; },
+    listProperty() { return { submitted: false }; }
   });
-  return { dom, controller, scanOptions, savedDrafts, navigations };
+  return { dom, controller, scanOptions, storage };
 }
 
 test('Refresh forces rental-market cache bypass', async () => {
@@ -116,39 +84,48 @@ test('Refresh forces rental-market cache bypass', async () => {
   assert.equal(scanOptions[1].force, true);
 });
 
-test('advanced per-property price override is used by Prepare Lease', async () => {
-  const { dom, controller, savedDrafts, navigations } = makeController();
-  await controller.load();
-  controller.setMode('advanced');
-
-  const row = dom.window.document.querySelector('[data-property-id="101"]');
-  const override = row.querySelector('[data-role="daily-price-override"]');
-  assert.ok(override);
-  override.value = '3000000';
-  override.dispatchEvent(new dom.window.Event('change', { bubbles: true }));
-
-  const action = row.querySelector('[data-action="prepare-lease"]');
-  action.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
-
-  assert.equal(savedDrafts.length, 1);
-  assert.equal(savedDrafts[0].dailyPrice, 3_000_000);
-  assert.equal(savedDrafts[0].propertyId, 101);
-  assert.equal(navigations.length, 1);
-});
-
-test('advanced mode shows current rented and for-rent details', async () => {
+test('settings expose fixed 100-day period and changing undercut recalculates proposed rent', async () => {
   const { dom, controller } = makeController();
   await controller.load();
-  controller.setMode('advanced');
+  controller.openSettings();
 
-  const rented = dom.window.document.querySelector('[data-property-id="102"]').textContent;
-  const forRent = dom.window.document.querySelector('[data-property-id="103"]').textContent;
+  const panel = dom.window.document.querySelector('#r4g3-prm-panel');
+  assert.match(panel.textContent, /Rental period:\s*100 days/i);
+  assert.equal(dom.window.document.querySelector('[data-role="days-input"]'), null);
 
-  assert.match(rented, /Tenant/);
-  assert.match(rented, /12 days/i);
-  assert.match(rented, /3,000,000/);
-  assert.match(forRent, /2,800,000/);
-  assert.match(forRent, /Applicant/);
+  const undercut = dom.window.document.querySelector('[data-role="undercut-input"]');
+  assert.ok(undercut);
+  undercut.value = '1';
+  const save = dom.window.document.querySelector('[data-action="save-settings"]');
+  save.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+
+  const row = dom.window.document.querySelector('[data-property-id="101"]');
+  assert.match(row.textContent, /Proposed 100-day rent:\s*\$346,500/i);
+});
+
+test('theme toggle persists and dark theme keeps readable green accent', async () => {
+  const { dom, controller, storage } = makeController();
+  await controller.load();
+  const darkPanel = dom.window.document.querySelector('#r4g3-prm-panel');
+  assert.equal(darkPanel.classList.contains('r4g3-prm-theme-dark'), true);
+  assert.match(darkPanel.querySelector('[data-role="drag-handle"]').style.color, /rgb\(116, 255, 139\)|#74ff8b/i);
+
+  const theme = darkPanel.querySelector('[data-action="toggle-theme"]');
+  theme.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+
+  const lightPanel = dom.window.document.querySelector('#r4g3-prm-panel');
+  assert.equal(lightPanel.classList.contains('r4g3-prm-theme-light'), true);
+  assert.equal(App.loadSettings(storage).theme, 'light');
+});
+
+test('desktop shell is movable and resizable', async () => {
+  const { dom, controller } = makeController();
+  await controller.load();
+  const panel = dom.window.document.querySelector('#r4g3-prm-panel');
+  const handle = dom.window.document.querySelector('[data-role="drag-handle"]');
+  assert.equal(panel.style.resize, 'both');
+  assert.ok(handle);
+  assert.equal(handle.style.cursor, 'move');
 });
 
 test('mobile shell stays on-screen and disables desktop resize affordance', async () => {

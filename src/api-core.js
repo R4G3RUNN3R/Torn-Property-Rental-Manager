@@ -102,6 +102,14 @@
     if (Array.isArray(body)) return body;
     if (body && Array.isArray(body[key])) return body[key];
     if (body && body.data && Array.isArray(body.data[key])) return body.data[key];
+
+    if (key === 'rentals') {
+      if (body && body.rentals && Array.isArray(body.rentals.listings)) return body.rentals.listings;
+      if (body && body.data && body.data.rentals && Array.isArray(body.data.rentals.listings)) {
+        return body.data.rentals.listings;
+      }
+    }
+
     return [];
   }
 
@@ -255,8 +263,14 @@
       }
 
       const result = await collectPages(`${API_BASE}/market/${id}/rentals?limit=100`, 'rentals');
+      const rentalRoot = result.firstBody && result.firstBody.rentals && typeof result.firstBody.rentals === 'object'
+        ? result.firstBody.rentals
+        : result.firstBody && result.firstBody.data && result.firstBody.data.rentals && typeof result.firstBody.data.rentals === 'object'
+          ? result.firstBody.data.rentals
+          : null;
       const market = {
         rentals: result.rows,
+        property: rentalRoot && rentalRoot.property ? rentalRoot.property : null,
         rentals_timestamp: result.firstBody.rentals_timestamp == null ? null : result.firstBody.rentals_timestamp,
         rentals_delay: result.firstBody.rentals_delay == null ? null : result.firstBody.rentals_delay,
         fetchedAt: now(),

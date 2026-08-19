@@ -201,6 +201,10 @@ test('bootstrap lister is armed only while the visible Torn form still matches t
 test('eligible property row uses PREPARE RENTAL and shows READY TO LIST when Torn form is armed', async () => {
   const { dom, controller } = makeController(() => true);
   await controller.load();
+  Bootstrap.decorateRentalActions({
+    document: dom.window.document,
+    canListProperty: () => true
+  });
 
   const row = dom.window.document.querySelector('[data-property-id="101"]');
   const prepare = row.querySelector('[data-action="set-price"]');

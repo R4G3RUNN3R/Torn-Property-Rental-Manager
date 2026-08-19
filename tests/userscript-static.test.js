@@ -12,10 +12,10 @@ function release() {
   return fs.readFileSync(releasePath, 'utf8');
 }
 
-test('release userscript has narrow Torn properties metadata and v0.2 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.3 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.2\.0/);
+  assert.match(source, /@version\s+0\.3\.0/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);

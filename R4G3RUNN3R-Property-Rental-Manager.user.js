@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
-// @version      0.3.0
+// @version      0.3.1
 // @description  Price owned Torn rentals from exact market matches and list them through an explicit two-click workflow.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
@@ -17,6 +17,23 @@
   if (root) root.R4G3PropertyCore = api;
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
+
+  const PROPERTY_IMAGE_BASE = 'https://www.torn.com/images/v2/properties/350x230/350x230_default_';
+  const PROPERTY_IMAGE_SLUGS = Object.freeze({
+    'trailer': 'trailer',
+    'apartment': 'apartment',
+    'semi-detached house': 'semi_detached',
+    'detached house': 'detached',
+    'beach house': 'beach_house',
+    'chalet': 'chalet',
+    'villa': 'villa',
+    'penthouse': 'penthouse',
+    'mansion': 'mansion',
+    'ranch': 'ranch',
+    'palace': 'palace',
+    'castle': 'castle',
+    'private island': 'private_island'
+  });
 
   function asPositiveInt(value) {
     const number = Number(value);
@@ -51,6 +68,17 @@
     return String(value == null ? '' : value).trim().toLowerCase();
   }
 
+  function propertyImageUrl(value) {
+    const name = String(value == null ? '' : value).trim();
+    if (!name) return '';
+    const key = name.toLowerCase();
+    const slug = PROPERTY_IMAGE_SLUGS[key] || key
+      .replace(/[’']/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return slug ? `${PROPERTY_IMAGE_BASE}${slug}.png` : '';
+  }
+
   function normalizeProperty(raw, currentUserId) {
     if (!raw || typeof raw !== 'object') return null;
 
@@ -59,7 +87,7 @@
       raw.owner_id != null ? raw.owner_id : ''
     );
 
-    if (currentUserId != null && ownerId && ownerId !== String(currentUserId)) {
+    if (currentUserId != null && ownerId !== String(currentUserId)) {
       return null;
     }
 
@@ -115,6 +143,9 @@
   }
 
   return Object.freeze({
+    PROPERTY_IMAGE_BASE,
+    PROPERTY_IMAGE_SLUGS,
+    propertyImageUrl,
     normalizeProperty,
     normalizeProperties,
     isEligibleForLease,
@@ -367,6 +398,7 @@
   const API_BASE = `${API_ORIGIN}/v2`;
   const CACHE_PREFIX = 'r4g3_property_rental_manager.market.';
   const FALLBACK_CACHE_MS = 15 * 60 * 1000;
+  const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
   const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 
   function defaultSleep(ms) {
@@ -501,6 +533,19 @@
     return Number.isInteger(number) && number > 0 ? number : 0;
   }
 
+  function apiErrorDetail(body) {
+    if (!body || !body.error) return '';
+    return body.error.error || body.error.message || JSON.stringify(body.error);
+  }
+
+  function apiErrorCode(body) {
+    return Number(body && body.error && body.error.code) || 0;
+  }
+
+  function isRateLimited(response, body) {
+    return Number(response && response.status) === 429 || apiErrorCode(body) === 5 || /too many requests/i.test(apiErrorDetail(body));
+  }
+
   function createClient(options) {
     const config = Object.assign({}, options || {});
     const apiKey = String(config.apiKey || '').trim();
@@ -509,6 +554,7 @@
     const sleep = config.sleep || defaultSleep;
     const storage = safeStorage(config.storage || (root && root.localStorage));
     const scheduler = config.scheduler || createScheduler({ now, sleep });
+    let currentUserIdPromise = null;
 
     if (!fetchImpl) throw new Error('A fetch implementation is required');
 
@@ -540,19 +586,26 @@
         body = null;
       }
 
+      if (isRateLimited(response, body)) {
+        if (tryNumber < 2) {
+          await sleep(RATE_LIMIT_COOLDOWN_MS);
+          return requestJson(url, tryNumber + 1);
+        }
+        const detail = apiErrorDetail(body) || `HTTP ${response.status}`;
+        throw new Error(redact(`Torn API rate limit: ${detail}`, apiKey));
+      }
+
       if (!response.ok) {
         if (TRANSIENT_STATUSES.has(Number(response.status)) && tryNumber < 2) {
           await sleep(250 * (tryNumber + 1));
           return requestJson(url, tryNumber + 1);
         }
-        const detail = body && body.error
-          ? (body.error.error || body.error.message || JSON.stringify(body.error))
-          : `HTTP ${response.status}`;
+        const detail = apiErrorDetail(body) || `HTTP ${response.status}`;
         throw new Error(redact(`Torn API ${response.status}: ${detail}`, apiKey));
       }
 
       if (body && body.error) {
-        const detail = body.error.error || body.error.message || JSON.stringify(body.error);
+        const detail = apiErrorDetail(body);
         throw new Error(redact(`Torn API error: ${detail}`, apiKey));
       }
 
@@ -601,6 +654,22 @@
         ? delaySeconds * 1000
         : FALLBACK_CACHE_MS;
       return now() - Number(cached.fetchedAt) < ttl;
+    }
+
+    async function fetchCurrentUserId() {
+      if (!currentUserIdPromise) {
+        currentUserIdPromise = (async () => {
+          const body = await requestJson(`${API_BASE}/user/basic`, 0);
+          const profile = body && body.profile && typeof body.profile === 'object' ? body.profile : body;
+          const id = positiveInt(profile && (profile.id != null ? profile.id : profile.player_id));
+          if (!id) throw new Error('Torn API user/basic response did not contain a valid user id');
+          return id;
+        })().catch(error => {
+          currentUserIdPromise = null;
+          throw error;
+        });
+      }
+      return currentUserIdPromise;
     }
 
     async function fetchOwnedProperties() {
@@ -681,6 +750,7 @@
     }
 
     return Object.freeze({
+      fetchCurrentUserId,
       fetchOwnedProperties,
       fetchRentalMarket,
       scanMarkets
@@ -690,6 +760,7 @@
   return Object.freeze({
     API_ORIGIN,
     API_BASE,
+    RATE_LIMIT_COOLDOWN_MS,
     createScheduler,
     createClient
   });
@@ -1141,8 +1212,12 @@
     };
     let panel = null;
     let dragCleanup = null;
+    let resizeCleanup = null;
     let resizeObserver = null;
     let settingsOpen = false;
+    let cachedApiClient = null;
+    let cachedApiKey = '';
+    let activeLoadPromise = null;
 
     function isMobile() {
       return Number(windowLike.innerWidth) <= MOBILE_BREAKPOINT;
@@ -1156,10 +1231,13 @@
     function getApiClient() {
       if (apiClientFactory) {
         if (!settings.apiKey) return null;
+        if (cachedApiClient && cachedApiKey === settings.apiKey) return cachedApiClient;
         const client = apiClientFactory(settings.apiKey);
         if (!client || typeof client.fetchOwnedProperties !== 'function' || typeof client.scanMarkets !== 'function') {
           throw new TypeError('apiClientFactory returned an invalid client');
         }
+        cachedApiClient = client;
+        cachedApiKey = settings.apiKey;
         return client;
       }
       return fixedApiClient;
@@ -1349,10 +1427,37 @@
       row.style.gridTemplateColumns = 'repeat(auto-fit, minmax(175px, 1fr))';
       row.style.gap = '8px 14px';
 
+      const identity = el(documentLike, 'div');
+      identity.style.gridColumn = '1 / -1';
+      identity.style.display = 'flex';
+      identity.style.alignItems = 'center';
+      identity.style.gap = '12px';
+      identity.style.minWidth = '0';
+
+      const imageUrl = typeof propertyCore.propertyImageUrl === 'function' ? propertyCore.propertyImageUrl(property.name) : '';
+      if (imageUrl) {
+        const image = el(documentLike, 'img', {
+          attrs: {
+            src: imageUrl,
+            alt: `${property.name} property`,
+            'data-role': 'property-image'
+          }
+        });
+        image.style.width = '112px';
+        image.style.height = '74px';
+        image.style.objectFit = 'cover';
+        image.style.borderRadius = '7px';
+        image.style.border = '1px solid rgba(128,128,128,0.3)';
+        image.style.flex = '0 0 auto';
+        image.loading = 'lazy';
+        image.addEventListener('error', () => { image.style.display = 'none'; }, { once: true });
+        identity.appendChild(image);
+      }
+
       const title = el(documentLike, 'strong', { text: `${property.name} #${property.id}` });
-      title.style.gridColumn = '1 / -1';
       title.style.fontSize = '14px';
-      row.appendChild(title);
+      identity.appendChild(title);
+      row.appendChild(identity);
 
       addCell(row, 'Status', labelStatus(property.status));
       addCell(row, 'Happy', money(property.happy));
@@ -1653,10 +1758,80 @@
       }
     }
 
+    function renderResizeHandle(container) {
+      if (isMobile() || settings.uiState === 'minimized') return;
+      const handle = el(documentLike, 'div', {
+        attrs: {
+          'data-role': 'resize-handle',
+          title: 'Drag to resize Property Rental Manager',
+          'aria-label': 'Resize Property Rental Manager'
+        }
+      });
+      handle.style.position = 'absolute';
+      handle.style.right = '1px';
+      handle.style.bottom = '1px';
+      handle.style.width = '20px';
+      handle.style.height = '20px';
+      handle.style.cursor = 'nwse-resize';
+      handle.style.zIndex = '4';
+      handle.style.borderRight = settings.theme === 'light' ? '3px solid #0d5c19' : '3px solid #74ff8b';
+      handle.style.borderBottom = settings.theme === 'light' ? '3px solid #0d5c19' : '3px solid #74ff8b';
+      handle.style.borderRadius = '0 0 8px 0';
+      handle.style.boxSizing = 'border-box';
+      container.appendChild(handle);
+    }
+
+    function attachExplicitResize(node) {
+      if (isMobile() || settings.uiState === 'minimized') return;
+      const handle = node.querySelector('[data-role="resize-handle"]');
+      if (!handle) return;
+      let resizing = false;
+      let startX = 0;
+      let startY = 0;
+      let originWidth = 0;
+      let originHeight = 0;
+
+      const onMove = event => {
+        if (!resizing) return;
+        const width = integer(originWidth + event.clientX - startX, 360, 3000, originWidth);
+        const height = integer(originHeight + event.clientY - startY, 260, 2400, originHeight);
+        node.style.width = `${width}px`;
+        node.style.height = `${height}px`;
+      };
+      const onUp = () => {
+        if (!resizing) return;
+        resizing = false;
+        persistGeometryFromPanel();
+      };
+      const onDown = event => {
+        if (event.button != null && event.button !== 0) return;
+        resizing = true;
+        startX = event.clientX;
+        startY = event.clientY;
+        originWidth = node.offsetWidth || parseInt(node.style.width, 10) || settings.geometry.width;
+        originHeight = node.offsetHeight || parseInt(node.style.height, 10) || settings.geometry.height;
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        if (typeof event.stopPropagation === 'function') event.stopPropagation();
+      };
+
+      handle.addEventListener('mousedown', onDown);
+      windowLike.addEventListener('mousemove', onMove);
+      windowLike.addEventListener('mouseup', onUp);
+      resizeCleanup = () => {
+        handle.removeEventListener('mousedown', onDown);
+        windowLike.removeEventListener('mousemove', onMove);
+        windowLike.removeEventListener('mouseup', onUp);
+      };
+    }
+
     function render() {
       if (dragCleanup) {
         dragCleanup();
         dragCleanup = null;
+      }
+      if (resizeCleanup) {
+        resizeCleanup();
+        resizeCleanup = null;
       }
       if (resizeObserver) {
         resizeObserver.disconnect();
@@ -1678,16 +1853,18 @@
         if (!renderStatus(panel)) {
           for (const row of state.rows) renderRow(row, panel);
         }
+        renderResizeHandle(panel);
       }
 
       documentLike.body.appendChild(panel);
       attachPanelEvents(panel);
       attachDrag(panel);
       attachResize(panel);
+      attachExplicitResize(panel);
       return panel;
     }
 
-    async function load(options) {
+    async function performLoad(options) {
       if (apiClientFactory && !settings.apiKey) {
         settingsOpen = true;
         state = {
@@ -1708,8 +1885,11 @@
       state = Object.assign({}, state, { loading: true, error: null, needsApiKey: false, actionMessage: '', scanProgress: null });
       render();
       try {
+        const currentUserId = typeof apiClient.fetchCurrentUserId === 'function'
+          ? await apiClient.fetchCurrentUserId()
+          : null;
         const rawProperties = await apiClient.fetchOwnedProperties();
-        const properties = propertyCore.normalizeProperties(rawProperties, null);
+        const properties = propertyCore.normalizeProperties(rawProperties, currentUserId);
         const typeIds = [...new Set(properties.map(property => Number(property.propertyTypeId)).filter(Boolean))];
         state = Object.assign({}, state, {
           properties,
@@ -1742,6 +1922,14 @@
       }
     }
 
+    function load(options) {
+      if (activeLoadPromise) return activeLoadPromise;
+      activeLoadPromise = performLoad(options).finally(() => {
+        activeLoadPromise = null;
+      });
+      return activeLoadPromise;
+    }
+
     function setTheme(theme) {
       persistSettings({ theme });
       render();
@@ -1761,6 +1949,10 @@
 
     function setApiKey(apiKey) {
       persistSettings({ apiKey: String(apiKey || '').trim() });
+      if (cachedApiKey !== settings.apiKey) {
+        cachedApiClient = null;
+        cachedApiKey = '';
+      }
       state = Object.assign({}, state, { needsApiKey: apiClientFactory ? !settings.apiKey : false, error: null });
       settingsOpen = true;
       render();
@@ -1769,6 +1961,7 @@
 
     function destroy() {
       if (dragCleanup) dragCleanup();
+      if (resizeCleanup) resizeCleanup();
       if (resizeObserver) resizeObserver.disconnect();
       if (panel && panel.parentNode) panel.remove();
       panel = null;

@@ -9,6 +9,7 @@
   const API_BASE = `${API_ORIGIN}/v2`;
   const CACHE_PREFIX = 'r4g3_property_rental_manager.market.';
   const FALLBACK_CACHE_MS = 15 * 60 * 1000;
+  const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
   const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 
   function defaultSleep(ms) {
@@ -143,6 +144,19 @@
     return Number.isInteger(number) && number > 0 ? number : 0;
   }
 
+  function apiErrorDetail(body) {
+    if (!body || !body.error) return '';
+    return body.error.error || body.error.message || JSON.stringify(body.error);
+  }
+
+  function apiErrorCode(body) {
+    return Number(body && body.error && body.error.code) || 0;
+  }
+
+  function isRateLimited(response, body) {
+    return Number(response && response.status) === 429 || apiErrorCode(body) === 5 || /too many requests/i.test(apiErrorDetail(body));
+  }
+
   function createClient(options) {
     const config = Object.assign({}, options || {});
     const apiKey = String(config.apiKey || '').trim();
@@ -151,6 +165,7 @@
     const sleep = config.sleep || defaultSleep;
     const storage = safeStorage(config.storage || (root && root.localStorage));
     const scheduler = config.scheduler || createScheduler({ now, sleep });
+    let currentUserIdPromise = null;
 
     if (!fetchImpl) throw new Error('A fetch implementation is required');
 
@@ -182,19 +197,26 @@
         body = null;
       }
 
+      if (isRateLimited(response, body)) {
+        if (tryNumber < 2) {
+          await sleep(RATE_LIMIT_COOLDOWN_MS);
+          return requestJson(url, tryNumber + 1);
+        }
+        const detail = apiErrorDetail(body) || `HTTP ${response.status}`;
+        throw new Error(redact(`Torn API rate limit: ${detail}`, apiKey));
+      }
+
       if (!response.ok) {
         if (TRANSIENT_STATUSES.has(Number(response.status)) && tryNumber < 2) {
           await sleep(250 * (tryNumber + 1));
           return requestJson(url, tryNumber + 1);
         }
-        const detail = body && body.error
-          ? (body.error.error || body.error.message || JSON.stringify(body.error))
-          : `HTTP ${response.status}`;
+        const detail = apiErrorDetail(body) || `HTTP ${response.status}`;
         throw new Error(redact(`Torn API ${response.status}: ${detail}`, apiKey));
       }
 
       if (body && body.error) {
-        const detail = body.error.error || body.error.message || JSON.stringify(body.error);
+        const detail = apiErrorDetail(body);
         throw new Error(redact(`Torn API error: ${detail}`, apiKey));
       }
 
@@ -243,6 +265,22 @@
         ? delaySeconds * 1000
         : FALLBACK_CACHE_MS;
       return now() - Number(cached.fetchedAt) < ttl;
+    }
+
+    async function fetchCurrentUserId() {
+      if (!currentUserIdPromise) {
+        currentUserIdPromise = (async () => {
+          const body = await requestJson(`${API_BASE}/user/basic`, 0);
+          const profile = body && body.profile && typeof body.profile === 'object' ? body.profile : body;
+          const id = positiveInt(profile && (profile.id != null ? profile.id : profile.player_id));
+          if (!id) throw new Error('Torn API user/basic response did not contain a valid user id');
+          return id;
+        })().catch(error => {
+          currentUserIdPromise = null;
+          throw error;
+        });
+      }
+      return currentUserIdPromise;
     }
 
     async function fetchOwnedProperties() {
@@ -323,6 +361,7 @@
     }
 
     return Object.freeze({
+      fetchCurrentUserId,
       fetchOwnedProperties,
       fetchRentalMarket,
       scanMarkets
@@ -332,6 +371,7 @@
   return Object.freeze({
     API_ORIGIN,
     API_BASE,
+    RATE_LIMIT_COOLDOWN_MS,
     createScheduler,
     createClient
   });

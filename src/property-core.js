@@ -5,6 +5,23 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
 
+  const PROPERTY_IMAGE_BASE = 'https://www.torn.com/images/v2/properties/350x230/350x230_default_';
+  const PROPERTY_IMAGE_SLUGS = Object.freeze({
+    'trailer': 'trailer',
+    'apartment': 'apartment',
+    'semi-detached house': 'semi_detached',
+    'detached house': 'detached',
+    'beach house': 'beach_house',
+    'chalet': 'chalet',
+    'villa': 'villa',
+    'penthouse': 'penthouse',
+    'mansion': 'mansion',
+    'ranch': 'ranch',
+    'palace': 'palace',
+    'castle': 'castle',
+    'private island': 'private_island'
+  });
+
   function asPositiveInt(value) {
     const number = Number(value);
     return Number.isInteger(number) && number > 0 ? number : 0;
@@ -38,6 +55,17 @@
     return String(value == null ? '' : value).trim().toLowerCase();
   }
 
+  function propertyImageUrl(value) {
+    const name = String(value == null ? '' : value).trim();
+    if (!name) return '';
+    const key = name.toLowerCase();
+    const slug = PROPERTY_IMAGE_SLUGS[key] || key
+      .replace(/[’']/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return slug ? `${PROPERTY_IMAGE_BASE}${slug}.png` : '';
+  }
+
   function normalizeProperty(raw, currentUserId) {
     if (!raw || typeof raw !== 'object') return null;
 
@@ -46,7 +74,7 @@
       raw.owner_id != null ? raw.owner_id : ''
     );
 
-    if (currentUserId != null && ownerId && ownerId !== String(currentUserId)) {
+    if (currentUserId != null && ownerId !== String(currentUserId)) {
       return null;
     }
 
@@ -102,6 +130,9 @@
   }
 
   return Object.freeze({
+    PROPERTY_IMAGE_BASE,
+    PROPERTY_IMAGE_SLUGS,
+    propertyImageUrl,
     normalizeProperty,
     normalizeProperties,
     isEligibleForLease,

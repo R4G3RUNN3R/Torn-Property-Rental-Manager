@@ -13,6 +13,7 @@
     theme: 'dark',
     undercutPercent: 0.5,
     days: TARGET_DAYS,
+    uiState: 'open',
     geometry: Object.freeze({ left: 32, top: 90, width: 920, height: 560 })
   });
 
@@ -36,6 +37,10 @@
     };
   }
 
+  function normalizeUiState(value) {
+    return value === 'closed' || value === 'minimized' ? value : 'open';
+  }
+
   function normalizeSettings(value) {
     const source = value && typeof value === 'object' ? value : {};
     return {
@@ -43,6 +48,7 @@
       theme: source.theme === 'light' ? 'light' : 'dark',
       undercutPercent: clamp(source.undercutPercent, 0, 25, DEFAULT_SETTINGS.undercutPercent),
       days: TARGET_DAYS,
+      uiState: normalizeUiState(source.uiState),
       geometry: normalizeGeometry(source.geometry)
     };
   }
@@ -128,7 +134,8 @@
       loading: false,
       error: null,
       needsApiKey: false,
-      actionMessage: ''
+      actionMessage: '',
+      scanProgress: null
     };
     let panel = null;
     let dragCleanup = null;
@@ -168,12 +175,17 @@
           }
         );
         return { property, market: market || null, quote };
+      }).sort((a, b) => {
+        const aEligible = propertyCore.isEligibleForLease(a.property) ? 1 : 0;
+        const bEligible = propertyCore.isEligibleForLease(b.property) ? 1 : 0;
+        if (aEligible !== bEligible) return bEligible - aEligible;
+        return String(a.property.name || '').localeCompare(String(b.property.name || '')) || Number(a.property.id) - Number(b.property.id);
       });
     }
 
     function applyPanelGeometry(node) {
       node.style.position = 'fixed';
-      node.style.overflow = 'auto';
+      node.style.overflow = settings.uiState === 'minimized' ? 'hidden' : 'auto';
       node.style.zIndex = '99999';
       node.style.maxWidth = 'calc(100vw - 16px)';
       node.style.maxHeight = 'calc(100vh - 16px)';
@@ -182,7 +194,7 @@
         node.style.left = '8px';
         node.style.top = '8px';
         node.style.width = 'calc(100vw - 16px)';
-        node.style.height = 'calc(100vh - 16px)';
+        node.style.height = settings.uiState === 'minimized' ? 'auto' : 'calc(100vh - 16px)';
         node.style.resize = 'none';
         return;
       }
@@ -191,8 +203,8 @@
       node.style.left = `${geometry.left}px`;
       node.style.top = `${geometry.top}px`;
       node.style.width = `${geometry.width}px`;
-      node.style.height = `${geometry.height}px`;
-      node.style.resize = 'both';
+      node.style.height = settings.uiState === 'minimized' ? 'auto' : `${geometry.height}px`;
+      node.style.resize = settings.uiState === 'minimized' ? 'none' : 'both';
     }
 
     function addStyles(node) {
@@ -207,7 +219,7 @@
       node.style.color = settings.theme === 'light' ? '#171917' : '#ecf4ed';
     }
 
-    function createButton(text, action) {
+    function createButton(text, action, title) {
       const button = el(documentLike, 'button', { text, attrs: { type: 'button', 'data-action': action } });
       button.style.cursor = 'pointer';
       button.style.padding = '7px 10px';
@@ -215,6 +227,7 @@
       button.style.border = '1px solid currentColor';
       button.style.background = 'transparent';
       button.style.color = 'inherit';
+      if (title) button.title = title;
       return button;
     }
 
@@ -225,7 +238,7 @@
       header.style.flexWrap = 'wrap';
       header.style.gap = '8px';
       header.style.padding = '9px 10px';
-      header.style.borderBottom = '1px solid rgba(128,128,128,0.35)';
+      header.style.borderBottom = settings.uiState === 'minimized' ? '0' : '1px solid rgba(128,128,128,0.35)';
       header.style.position = 'sticky';
       header.style.top = '0';
       header.style.background = settings.theme === 'light' ? '#f5f5f2' : '#111512';
@@ -241,16 +254,21 @@
       dragHandle.style.color = settings.theme === 'light' ? '#102513' : '#74ff8b';
       header.appendChild(dragHandle);
 
-      const refreshButton = createButton(state.loading ? 'Scanning…' : 'Refresh', 'refresh');
-      refreshButton.disabled = Boolean(state.loading);
-      const settingsButton = createButton(settingsOpen ? 'Close Settings' : 'Settings', 'toggle-settings');
-      const themeButton = createButton(settings.theme === 'dark' ? 'Light' : 'Dark', 'toggle-theme');
-      header.append(refreshButton, settingsButton, themeButton);
+      if (settings.uiState !== 'minimized') {
+        const refreshButton = createButton(state.loading ? 'Scanning…' : 'Refresh', 'refresh', 'Refresh properties and use fresh cached market data when available');
+        refreshButton.disabled = Boolean(state.loading);
+        const settingsButton = createButton(settingsOpen ? 'Close Settings' : 'Settings', 'toggle-settings');
+        const themeButton = createButton(settings.theme === 'dark' ? 'Light' : 'Dark', 'toggle-theme');
+        header.append(refreshButton, settingsButton, themeButton);
+      }
+
+      header.appendChild(createButton(settings.uiState === 'minimized' ? '□' : '—', 'minimize', settings.uiState === 'minimized' ? 'Restore' : 'Minimize'));
+      header.appendChild(createButton('×', 'close', 'Close'));
       container.appendChild(header);
     }
 
     function renderSettings(container) {
-      if (!settingsOpen) return;
+      if (!settingsOpen || settings.uiState === 'minimized') return;
       const box = el(documentLike, 'section', { className: 'r4g3-prm-settings' });
       box.style.padding = '10px';
       box.style.margin = '8px';
@@ -287,13 +305,15 @@
       const actions = el(documentLike, 'div');
       actions.style.gridColumn = '1 / -1';
       actions.style.display = 'flex';
+      actions.style.flexWrap = 'wrap';
       actions.style.gap = '8px';
       actions.appendChild(createButton('Save Settings', 'save-settings'));
+      actions.appendChild(createButton('Force Market Refresh', 'force-refresh', 'Bypass cached Torn rental-market data for all property types'));
       if (settings.apiKey) actions.appendChild(createButton('Clear API Key', 'clear-api-key'));
       box.appendChild(actions);
 
       const note = el(documentLike, 'small', {
-        text: 'Market rentals are normalized to a 100-day total before averaging. Saved API keys are never rendered back into the page.'
+        text: 'Market rentals are normalized to a 100-day total before averaging. Normal Refresh reuses fresh Torn market cache; Force Market Refresh bypasses it.'
       });
       note.style.gridColumn = '1 / -1';
       note.style.opacity = '0.72';
@@ -314,7 +334,7 @@
     }
 
     function renderRow(entry, container) {
-      const { property, quote } = entry;
+      const { property, quote, market } = entry;
       const row = el(documentLike, 'section', {
         className: 'r4g3-prm-property',
         attrs: { 'data-property-id': property.id }
@@ -336,12 +356,25 @@
       addCell(row, 'Happy', money(property.happy));
       addCell(row, 'Upgrades', property.modifications && property.modifications.length ? property.modifications.join(', ') : 'None');
 
-      if (quote.exactMatchCount > 0) {
+      if (market && market.error) {
+        const failed = el(documentLike, 'div', { text: `Market scan failed for this property type: ${market.error}` });
+        failed.style.gridColumn = '1 / -1';
+        row.appendChild(failed);
+        const retry = createButton('RETRY MARKET', 'retry-market');
+        retry.dataset.propertyTypeId = String(property.propertyTypeId);
+        row.appendChild(retry);
+      } else if (!market && state.loading) {
+        const pending = el(documentLike, 'div', { text: 'Market scan pending…' });
+        pending.style.gridColumn = '1 / -1';
+        pending.style.opacity = '0.72';
+        row.appendChild(pending);
+      } else if (quote.exactMatchCount > 0) {
         addCell(row, 'Exact matches', quote.exactMatchCount);
         addCell(row, 'Lowest 100-day', `$${money(quote.lowestTotal)}`);
         addCell(row, 'Highest 100-day', `$${money(quote.highestTotal)}`);
         addCell(row, 'Average 100-day', `$${money(quote.averageTotal)}`);
         addCell(row, 'Proposed 100-day rent', `$${money(quote.proposedTotal)}`, true);
+        addCell(row, 'Market source', market && market.fromCache ? 'Cached' : 'Live');
       } else {
         const noMatches = el(documentLike, 'div', { text: 'No exact market matches for this upgrade configuration.' });
         noMatches.style.gridColumn = '1 / -1';
@@ -391,10 +424,14 @@
         return true;
       }
       if (state.loading) {
-        const loading = el(documentLike, 'div', { text: 'Scanning owned properties and rental markets…' });
-        loading.style.padding = '14px';
+        const progress = state.scanProgress && state.scanProgress.total
+          ? `Scanning rental markets… ${state.scanProgress.done}/${state.scanProgress.total}`
+          : 'Scanning owned properties and rental markets…';
+        const loading = el(documentLike, 'div', { text: progress });
+        loading.style.padding = '10px 14px';
+        loading.style.borderBottom = '1px solid rgba(128,128,128,0.2)';
         container.appendChild(loading);
-        return true;
+        return !state.rows.length;
       }
       if (state.error) {
         const error = el(documentLike, 'div', { text: 'Unable to load property data. Check your Torn API key and try again.' });
@@ -449,13 +486,78 @@
       return result || false;
     }
 
+    async function retryMarket(propertyTypeId) {
+      const id = Number(propertyTypeId);
+      const apiClient = getApiClient();
+      if (!apiClient || typeof apiClient.fetchRentalMarket !== 'function' || !id) return false;
+      state = Object.assign({}, state, { actionMessage: `Retrying market ${id}…` });
+      render();
+      try {
+        const market = await apiClient.fetchRentalMarket(id, { force: true });
+        const markets = Object.assign({}, state.markets, { [id]: market });
+        state = Object.assign({}, state, {
+          markets,
+          rows: computeRows(state.properties, markets),
+          actionMessage: `Market ${id} refreshed.`
+        });
+        render();
+        return true;
+      } catch (error) {
+        const markets = Object.assign({}, state.markets, {
+          [id]: { rentals: [], error: String(error && error.message || error) }
+        });
+        state = Object.assign({}, state, { markets, rows: computeRows(state.properties, markets), actionMessage: `Market ${id} retry failed.` });
+        render();
+        return false;
+      }
+    }
+
+    function closePanel() {
+      persistGeometryFromPanel();
+      persistSettings({ uiState: 'closed' });
+      render();
+      return true;
+    }
+
+    function toggleMinimize() {
+      if (settings.uiState === 'minimized') persistSettings({ uiState: 'open' });
+      else {
+        persistGeometryFromPanel();
+        persistSettings({ uiState: 'minimized' });
+      }
+      render();
+      return settings.uiState;
+    }
+
+    function open() {
+      persistSettings({ uiState: 'open' });
+      render();
+      return true;
+    }
+
     function attachPanelEvents(node) {
       node.addEventListener('click', event => {
         const button = event.target && event.target.closest && event.target.closest('[data-action]');
         if (!button || !node.contains(button)) return;
         const action = button.dataset.action;
         if (action === 'refresh') {
+          load({ force: false }).catch(() => {});
+          return;
+        }
+        if (action === 'force-refresh') {
           load({ force: true }).catch(() => {});
+          return;
+        }
+        if (action === 'retry-market') {
+          retryMarket(Number(button.dataset.propertyTypeId)).catch(() => {});
+          return;
+        }
+        if (action === 'minimize') {
+          toggleMinimize();
+          return;
+        }
+        if (action === 'close') {
+          closePanel();
           return;
         }
         if (action === 'toggle-theme') {
@@ -531,7 +633,7 @@
     }
 
     function persistGeometryFromPanel() {
-      if (!panel || isMobile()) return;
+      if (!panel || isMobile() || settings.uiState === 'minimized') return;
       const geometry = {
         left: parseInt(panel.style.left, 10) || 0,
         top: parseInt(panel.style.top, 10) || 0,
@@ -542,7 +644,7 @@
     }
 
     function attachResize(node) {
-      if (isMobile()) return;
+      if (isMobile() || settings.uiState === 'minimized') return;
       if (windowLike.ResizeObserver) {
         resizeObserver = new windowLike.ResizeObserver(() => persistGeometryFromPanel());
         resizeObserver.observe(node);
@@ -559,16 +661,21 @@
         resizeObserver = null;
       }
       if (panel && panel.parentNode) panel.remove();
+      panel = null;
+
+      if (settings.uiState === 'closed') return null;
 
       panel = el(documentLike, 'aside', { attrs: { id: 'r4g3-prm-panel' } });
       panel.className = `r4g3-prm-theme-${settings.theme}`;
       applyPanelGeometry(panel);
       addStyles(panel);
       renderHeader(panel);
-      renderSettings(panel);
 
-      if (!renderStatus(panel)) {
-        for (const row of state.rows) renderRow(row, panel);
+      if (settings.uiState !== 'minimized') {
+        renderSettings(panel);
+        if (!renderStatus(panel)) {
+          for (const row of state.rows) renderRow(row, panel);
+        }
       }
 
       documentLike.body.appendChild(panel);
@@ -588,25 +695,46 @@
           loading: false,
           error: null,
           needsApiKey: true,
-          actionMessage: ''
+          actionMessage: '',
+          scanProgress: null
         };
         render();
         return state;
       }
 
       const apiClient = getApiClient();
-      state = Object.assign({}, state, { loading: true, error: null, needsApiKey: false, actionMessage: '' });
+      state = Object.assign({}, state, { loading: true, error: null, needsApiKey: false, actionMessage: '', scanProgress: null });
       render();
       try {
         const rawProperties = await apiClient.fetchOwnedProperties();
         const properties = propertyCore.normalizeProperties(rawProperties, null);
-        const markets = await apiClient.scanMarkets(properties, { force: Boolean(options && options.force) });
+        const typeIds = [...new Set(properties.map(property => Number(property.propertyTypeId)).filter(Boolean))];
+        state = Object.assign({}, state, {
+          properties,
+          markets: {},
+          rows: computeRows(properties, {}),
+          scanProgress: { done: 0, total: typeIds.length }
+        });
+        render();
+
+        const markets = await apiClient.scanMarkets(properties, {
+          force: Boolean(options && options.force),
+          onProgress(entry) {
+            const nextMarkets = Object.assign({}, state.markets, { [entry.id]: entry.market });
+            state = Object.assign({}, state, {
+              markets: nextMarkets,
+              rows: computeRows(properties, nextMarkets),
+              scanProgress: { done: entry.done, total: entry.total }
+            });
+            render();
+          }
+        });
         const rows = computeRows(properties, markets);
-        state = { properties, markets, rows, loading: false, error: null, needsApiKey: false, actionMessage: '' };
+        state = { properties, markets, rows, loading: false, error: null, needsApiKey: false, actionMessage: '', scanProgress: null };
         render();
         return state;
       } catch (error) {
-        state = Object.assign({}, state, { loading: false, error: error || new Error('Unknown load failure'), needsApiKey: false });
+        state = Object.assign({}, state, { loading: false, error: error || new Error('Unknown load failure'), needsApiKey: false, scanProgress: null });
         render();
         throw error;
       }
@@ -623,6 +751,7 @@
     }
 
     function openSettings() {
+      if (settings.uiState === 'closed' || settings.uiState === 'minimized') persistSettings({ uiState: 'open' });
       settingsOpen = true;
       render();
       return true;
@@ -648,6 +777,10 @@
     return Object.freeze({
       load,
       render,
+      open,
+      close: closePanel,
+      toggleMinimize,
+      retryMarket,
       setPriceForProperty,
       listPreparedProperty,
       prepareLease: setPriceForProperty,

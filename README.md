@@ -1,8 +1,8 @@
 # Torn Property Rental Manager
 
-A standalone Torn.com userscript by **R4G3RUNN3R** for pricing and listing properties you own using the live Torn rental market.
+A standalone Torn.com userscript by **R4G3RUNN3R** for pricing and listing properties you own using the Torn rental market.
 
-## What v0.2 does
+## What v0.3 does
 
 For each owned property, the manager:
 
@@ -22,7 +22,20 @@ For each owned property, the manager:
    - **SET PRICE**: stores the proposed 100-day total, opens that property's native Torn lease page, and fills 100 days plus the exact total cost.
    - **LIST PROPERTY**: becomes available only when the matching prepared Torn lease form is visible; your second explicit click triggers the one native listing action.
 
-If the market contains no exact-upgrade matches, the manager does not invent a price. It reports that no exact market matches were found.
+If the market contains no exact-upgrade matches, the manager does not invent a price.
+
+### New in v0.3
+
+- Faster market scans: unique property-type requests are queued together while the existing scheduler still controls request-start pacing.
+- Progressive results and `done / total` scan status while markets finish.
+- A failed market no longer destroys the whole scan; successful property types remain usable and failed markets get **RETRY MARKET**.
+- Normal **Refresh** reuses fresh cached market data.
+- **Force Market Refresh** in Settings explicitly bypasses the market cache.
+- Rentable properties are shown first.
+- Rows identify whether their market result came from **Cached** or **Live** data.
+- Persistent **Minimize** and **Close** controls, while preserving desktop geometry.
+- A **Rentals** launcher is inserted into Torn's **Information** area when that structure is available, with a floating fallback if Torn's page layout does not expose it.
+- The launcher is automatically restored after Torn SPA DOM rerenders.
 
 ## Install
 
@@ -30,13 +43,15 @@ The generated installable userscript is:
 
 `R4G3RUNN3R-Property-Rental-Manager.user.js`
 
-After v0.2 is merged to `main`, its raw GitHub URL is:
+Main-branch raw userscript:
 
 `https://raw.githubusercontent.com/R4G3RUNN3R/Torn-Property-Rental-Manager/main/R4G3RUNN3R-Property-Rental-Manager.user.js`
 
-The script runs only on:
+The script deliberately remains scoped to:
 
 `https://www.torn.com/properties.php*`
+
+That means the Rentals launcher belongs to the Properties area rather than injecting the manager across unrelated Torn pages.
 
 ## First setup
 
@@ -50,13 +65,14 @@ The saved key remains browser-local. The settings UI never renders the saved key
 
 ## Rental workflow
 
-For an owned property whose status is `none`, a priced row looks conceptually like this:
+For an owned property whose status is `none`, a priced row includes:
 
-- Exact matches
-- Lowest 100-day rent
-- Highest 100-day rent
-- Average 100-day rent
-- Proposed 100-day rent
+- exact matches
+- lowest 100-day rent
+- highest 100-day rent
+- average 100-day rent
+- proposed 100-day rent
+- market source: Cached or Live
 - **SET PRICE**
 - **LIST PROPERTY**
 
@@ -104,9 +120,11 @@ Default settings:
 - rental period: **100 days** (fixed)
 - average undercut: **0.5%**
 
-## Refresh and API pacing
+## Refresh, resilience and API pacing
 
-Normal scans reuse fresh local rental-market cache data. **Refresh** bypasses the local freshness decision and requests current API data again through the shared scheduler.
+A normal **Refresh** reuses a fresh rental-market cache entry when Torn's cache timing says it is still valid. **Force Market Refresh** bypasses that cache deliberately.
+
+Market types are queued together so network waits can overlap, but actual API request starts still pass through the shared scheduler.
 
 Hard request controls:
 
@@ -115,6 +133,8 @@ Hard request controls:
 - bounded retries for transient failures
 - pagination continuation URLs accepted only from `https://api.torn.com/v2/`
 - rental-market responses read from Torn's current `rentals.listings[]` structure
+
+If one property type fails after retries, that failure is isolated to the affected type. Other completed markets remain displayed and usable.
 
 ## Safety boundary
 
@@ -129,11 +149,17 @@ The userscript does not perform unattended native Torn actions.
 ## Interface
 
 - focused property-by-property landlord view
+- rentable properties first
 - fixed 100-day rental pricing
 - exact-upgrade match counts
 - low / high / average / proposed 100-day totals
+- cached/live source indicator
+- progressive scan status
+- per-market retry on failure
 - movable and resizable desktop panel
-- persistent desktop geometry
+- persistent desktop geometry and open/minimized/closed state
+- Minimize and Close titlebar controls
+- Torn Information launcher plus floating fallback
 - responsive mobile layout
 - dark and light themes
 - readable dark-mode text with green accents
@@ -155,14 +181,14 @@ GitHub Actions runs the full test suite, JavaScript syntax checks, and verifies 
 
 - `src/property-core.js` - owned property normalization and lease eligibility
 - `src/market-core.js` - exact-upgrade matching and normalized 100-day rental quotes
-- `src/api-core.js` - Torn API client, current rental response parsing, pagination, caching and rate scheduling
+- `src/api-core.js` - Torn API client, current rental response parsing, pagination, caching, concurrent market orchestration and rate scheduling
 - `src/draft-core.js` - short-lived property-specific lease drafts with exact total preservation
 - `src/form-core.js` - native lease field preparation and explicit user-triggered listing action
-- `src/app.js` - focused rental-manager UI and two-button orchestration
-- `src/bootstrap.js` - userscript startup, Torn-only API transport and live native-form bridge
+- `src/app.js` - rental-manager UI, window state, progressive market display and two-button orchestration
+- `src/bootstrap.js` - userscript startup, Torn-only API transport, launcher integration and live native-form bridge
 - `tests/` - Node test suite
 - `scripts/build-userscript.js` - deterministic single-file userscript builder
 
-## v0.2 non-goals
+## v0.3 non-goals
 
 This release does not buy properties, scan the property sale market for investments, automatically reprice already-listed properties, submit lease extensions, or submit listings without the user's explicit listing click.

@@ -69,7 +69,7 @@ function makeController(options = {}) {
   return { dom, controller, scanOptions, storage };
 }
 
-test('Refresh forces rental-market cache bypass', async () => {
+test('Refresh uses fresh rental cache while Force Market Refresh bypasses it', async () => {
   const { dom, controller, scanOptions } = makeController();
   await controller.load();
   assert.equal(scanOptions[0].force, false);
@@ -79,9 +79,17 @@ test('Refresh forces rental-market cache bypass', async () => {
   refresh.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
   await new Promise(resolve => dom.window.setTimeout(resolve, 0));
   await new Promise(resolve => dom.window.setTimeout(resolve, 0));
-
   assert.equal(scanOptions.length, 2);
-  assert.equal(scanOptions[1].force, true);
+  assert.equal(scanOptions[1].force, false);
+
+  controller.openSettings();
+  const force = dom.window.document.querySelector('[data-action="force-refresh"]');
+  assert.ok(force);
+  force.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+  await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+  assert.equal(scanOptions.length, 3);
+  assert.equal(scanOptions[2].force, true);
 });
 
 test('settings expose fixed 100-day period and changing undercut recalculates proposed rent', async () => {
@@ -126,6 +134,35 @@ test('desktop shell is movable and resizable', async () => {
   assert.equal(panel.style.resize, 'both');
   assert.ok(handle);
   assert.equal(handle.style.cursor, 'move');
+});
+
+test('minimize and close persist UI state and controller can restore the panel', async () => {
+  const { dom, controller, storage } = makeController();
+  await controller.load();
+
+  let panel = dom.window.document.querySelector('#r4g3-prm-panel');
+  const minimize = panel.querySelector('[data-action="minimize"]');
+  const close = panel.querySelector('[data-action="close"]');
+  assert.ok(minimize);
+  assert.ok(close);
+
+  minimize.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  panel = dom.window.document.querySelector('#r4g3-prm-panel');
+  assert.equal(App.loadSettings(storage).uiState, 'minimized');
+  assert.equal(panel.querySelector('[data-property-id="101"]'), null);
+
+  controller.open();
+  panel = dom.window.document.querySelector('#r4g3-prm-panel');
+  assert.equal(App.loadSettings(storage).uiState, 'open');
+  assert.ok(panel.querySelector('[data-property-id="101"]'));
+
+  panel.querySelector('[data-action="close"]').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  assert.equal(App.loadSettings(storage).uiState, 'closed');
+  assert.equal(dom.window.document.querySelector('#r4g3-prm-panel'), null);
+
+  controller.open();
+  assert.ok(dom.window.document.querySelector('#r4g3-prm-panel'));
+  assert.equal(App.loadSettings(storage).uiState, 'open');
 });
 
 test('mobile shell stays on-screen and disables desktop resize affordance', async () => {

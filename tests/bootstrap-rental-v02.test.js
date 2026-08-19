@@ -94,3 +94,41 @@ test('lease lister never submits automatically merely because it is armed', () =
   assert.equal(lister.canList(101), true);
   assert.equal(clicks, 0);
 });
+
+test('launcher mounts inside Torn Information section and opens the controller', () => {
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <section id="sidebar-information"><h4>Information</h4><div class="links"></div></section>
+  </body></html>`, { url: 'https://www.torn.com/properties.php' });
+  let opened = 0;
+  const launcher = Bootstrap.createLauncher({
+    window: dom.window,
+    document: dom.window.document,
+    onOpen() { opened += 1; }
+  });
+
+  launcher.ensure();
+  const button = dom.window.document.querySelector('#r4g3-prm-sidebar-launcher');
+  assert.ok(button);
+  assert.ok(dom.window.document.querySelector('#sidebar-information').contains(button));
+  assert.equal(dom.window.document.querySelector('#r4g3-prm-floating-launcher'), null);
+
+  button.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+  assert.equal(opened, 1);
+  launcher.destroy();
+});
+
+test('launcher provides a floating fallback when Torn Information section is unavailable', () => {
+  const dom = new JSDOM('<!doctype html><html><body><main>Properties</main></body></html>', {
+    url: 'https://www.torn.com/properties.php'
+  });
+  const launcher = Bootstrap.createLauncher({
+    window: dom.window,
+    document: dom.window.document,
+    onOpen() {}
+  });
+
+  launcher.ensure();
+  assert.ok(dom.window.document.querySelector('#r4g3-prm-floating-launcher'));
+  launcher.destroy();
+  assert.equal(dom.window.document.querySelector('#r4g3-prm-floating-launcher'), null);
+});

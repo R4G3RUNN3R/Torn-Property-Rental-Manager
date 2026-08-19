@@ -58,6 +58,105 @@
     };
   }
 
+  function findInformationSection(documentLike) {
+    if (!documentLike || !documentLike.querySelectorAll) return null;
+    const candidates = documentLike.querySelectorAll('h1,h2,h3,h4,h5,h6,span,div,strong');
+    for (const node of candidates) {
+      if (String(node.textContent || '').trim().toLowerCase() !== 'information') continue;
+      if (node.closest) {
+        const section = node.closest('section,aside,nav,li,div');
+        if (section) return section;
+      }
+      if (node.parentElement) return node.parentElement;
+    }
+    return null;
+  }
+
+  function createLauncher(options) {
+    const config = options || {};
+    const windowLike = config.window;
+    const documentLike = config.document;
+    const onOpen = typeof config.onOpen === 'function' ? config.onOpen : () => {};
+    let observer = null;
+
+    function makeButton(id, floating) {
+      const button = documentLike.createElement('button');
+      button.id = id;
+      button.type = 'button';
+      button.title = 'Open Property Rental Manager';
+      button.setAttribute('aria-label', 'Open Property Rental Manager');
+      button.style.cursor = 'pointer';
+      button.style.display = 'inline-flex';
+      button.style.alignItems = 'center';
+      button.style.justifyContent = 'center';
+      button.style.gap = '6px';
+      button.style.border = '1px solid rgba(116,255,139,0.55)';
+      button.style.borderRadius = '7px';
+      button.style.background = '#111512';
+      button.style.color = '#74ff8b';
+      button.style.padding = floating ? '9px 11px' : '6px 8px';
+      button.style.fontSize = '12px';
+      button.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M3 11.5 12 4l9 7.5v8a1 1 0 0 1-1 1h-5.5v-6h-5v6H4a1 1 0 0 1-1-1v-8Z"/></svg><span>Rentals</span>';
+      button.addEventListener('click', event => {
+        if (event && typeof event.preventDefault === 'function') event.preventDefault();
+        onOpen();
+      });
+      if (floating) {
+        button.style.position = 'fixed';
+        button.style.right = '14px';
+        button.style.bottom = '76px';
+        button.style.zIndex = '99998';
+        button.style.boxShadow = '0 8px 24px rgba(0,0,0,0.35)';
+      }
+      return button;
+    }
+
+    function ensure() {
+      if (!documentLike || !documentLike.body) return null;
+      let sidebar = documentLike.getElementById('r4g3-prm-sidebar-launcher');
+      let floating = documentLike.getElementById('r4g3-prm-floating-launcher');
+      const information = findInformationSection(documentLike);
+
+      if (information) {
+        if (!sidebar || !information.contains(sidebar)) {
+          if (sidebar && sidebar.parentNode) sidebar.remove();
+          sidebar = makeButton('r4g3-prm-sidebar-launcher', false);
+          const host = information.querySelector && information.querySelector('.links,ul,ol') || information;
+          host.appendChild(sidebar);
+        }
+        if (floating && floating.parentNode) floating.remove();
+        return sidebar;
+      }
+
+      if (sidebar && sidebar.parentNode) sidebar.remove();
+      if (!floating) {
+        floating = makeButton('r4g3-prm-floating-launcher', true);
+        documentLike.body.appendChild(floating);
+      }
+      return floating;
+    }
+
+    function start() {
+      ensure();
+      if (windowLike && windowLike.MutationObserver && documentLike && documentLike.body) {
+        observer = new windowLike.MutationObserver(() => ensure());
+        observer.observe(documentLike.body, { childList: true, subtree: true });
+      }
+      return true;
+    }
+
+    function destroy() {
+      if (observer) observer.disconnect();
+      observer = null;
+      const sidebar = documentLike && documentLike.getElementById('r4g3-prm-sidebar-launcher');
+      const floating = documentLike && documentLike.getElementById('r4g3-prm-floating-launcher');
+      if (sidebar && sidebar.parentNode) sidebar.remove();
+      if (floating && floating.parentNode) floating.remove();
+    }
+
+    return Object.freeze({ ensure, start, destroy });
+  }
+
   function createLeasePreparer(options) {
     const config = options || {};
     const windowLike = config.window;
@@ -213,12 +312,22 @@
       }
     });
 
+    const launcher = createLauncher({
+      window: win,
+      document: win.document,
+      onOpen() {
+        controller.open();
+      }
+    });
+
     const onHashChange = () => {
       leasePreparer.prepareWithWait();
       controller.render();
+      launcher.ensure();
     };
     win.addEventListener('hashchange', onHashChange);
     leasePreparer.prepareWithWait();
+    launcher.start();
     controller.load().catch(() => {
       // The controller renders a sanitized error state. Never log the API key-bearing error.
     });
@@ -227,9 +336,11 @@
       controller,
       leasePreparer,
       leaseLister,
+      launcher,
       destroy() {
         win.removeEventListener('hashchange', onHashChange);
         leasePreparer.stop();
+        launcher.destroy();
         controller.destroy();
       }
     });
@@ -238,6 +349,8 @@
   return Object.freeze({
     assertApiUrl,
     createApiFetch,
+    findInformationSection,
+    createLauncher,
     createLeasePreparer,
     createLeaseLister,
     start

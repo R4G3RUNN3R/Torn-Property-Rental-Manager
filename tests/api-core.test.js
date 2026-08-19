@@ -160,6 +160,63 @@ test('deduplicates property types during market scan', async () => {
   assert.deepEqual(calls.sort((a, b) => a - b), [10, 13]);
 });
 
+test('market scan starts all unique market requests without waiting for earlier responses', async () => {
+  const pending = [];
+  const calls = [];
+  const client = ApiCore.createClient({
+    apiKey: 'k',
+    fetchImpl: url => {
+      const match = url.match(/\/market\/(\d+)\/rentals/);
+      if (match) calls.push(Number(match[1]));
+      return new Promise(resolve => pending.push(() => resolve(okJson({ rentals: [] }))));
+    },
+    scheduler: { run: fn => fn() },
+    storage: memoryStorage()
+  });
+
+  const scan = client.scanMarkets([
+    { propertyTypeId: 10 },
+    { propertyTypeId: 11 },
+    { propertyTypeId: 12 }
+  ]);
+
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(calls, [10, 11, 12]);
+
+  pending.forEach(resolve => resolve());
+  await scan;
+});
+
+test('market scan preserves successful markets when another property type fails and reports progress', async () => {
+  const progress = [];
+  const client = ApiCore.createClient({
+    apiKey: 'test-api-key',
+    fetchImpl: async url => {
+      if (url.includes('/market/11/')) throw new Error('network down');
+      return okJson({ rentals: [{ id: Number(url.match(/\/market\/(\d+)\//)[1]) }] });
+    },
+    sleep: async () => {},
+    scheduler: { run: fn => fn() },
+    storage: memoryStorage()
+  });
+
+  const markets = await client.scanMarkets([
+    { propertyTypeId: 10 },
+    { propertyTypeId: 11 },
+    { propertyTypeId: 12 }
+  ], {
+    onProgress(entry) { progress.push(entry); }
+  });
+
+  assert.equal(markets[10].rentals[0].id, 10);
+  assert.equal(markets[12].rentals[0].id, 12);
+  assert.match(markets[11].error, /network down/i);
+  assert.equal(progress.length, 3);
+  assert.deepEqual(progress.map(entry => entry.done).sort((a, b) => a - b), [1, 2, 3]);
+  assert.ok(progress.every(entry => entry.total === 3));
+});
+
 test('reuses fresh rental cache and force bypasses it', async () => {
   let clock = 1_000_000;
   let fetches = 0;

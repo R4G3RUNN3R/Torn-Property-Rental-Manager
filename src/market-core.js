@@ -54,6 +54,16 @@
     return union ? intersection / union : 1;
   }
 
+  function exactModificationMatch(a, b) {
+    const setA = stringSet(a);
+    const setB = stringSet(b);
+    if (setA.size !== setB.size) return false;
+    for (const value of setA) {
+      if (!setB.has(value)) return false;
+    }
+    return true;
+  }
+
   function similarity(owned, listing) {
     const happyScore = happySimilarity(owned && owned.happy, listing && listing.happy);
     const modificationScore = modificationSimilarity(
@@ -165,12 +175,56 @@
     };
   }
 
+  function rentalQuote(owned, listings, settings) {
+    const options = Object.assign({
+      targetDays: 100,
+      undercutPercent: 0.5
+    }, settings || {});
+    const targetDays = Math.max(1, Math.floor(number(options.targetDays, 100)) || 100);
+    const undercutPercent = Math.max(0, number(options.undercutPercent, 0.5));
+    const rows = (Array.isArray(listings) ? listings : [])
+      .map(normalizeRental)
+      .filter(row => exactModificationMatch(owned && owned.modifications, row.modifications))
+      .filter(row => row.cost > 0 && row.rental_period > 0)
+      .map(row => Object.assign({}, row, {
+        equivalentTotal: row.cost / row.rental_period * targetDays
+      }));
+
+    if (!rows.length) {
+      return {
+        targetDays,
+        exactMatchCount: 0,
+        lowestTotal: null,
+        highestTotal: null,
+        averageTotal: null,
+        proposedTotal: null,
+        exactMatches: []
+      };
+    }
+
+    const totals = rows.map(row => row.equivalentTotal);
+    const rawAverage = totals.reduce((sum, value) => sum + value, 0) / totals.length;
+    const multiplier = Math.max(0, 1 - undercutPercent / 100);
+
+    return {
+      targetDays,
+      exactMatchCount: rows.length,
+      lowestTotal: Math.floor(Math.min(...totals)),
+      highestTotal: Math.floor(Math.max(...totals)),
+      averageTotal: Math.floor(rawAverage),
+      proposedTotal: Math.floor(rawAverage * multiplier),
+      exactMatches: rows
+    };
+  }
+
   return Object.freeze({
     normalizeRental,
     happySimilarity,
     modificationSimilarity,
+    exactModificationMatch,
     similarity,
     selectComparables,
-    marketStats
+    marketStats,
+    rentalQuote
   });
 }));

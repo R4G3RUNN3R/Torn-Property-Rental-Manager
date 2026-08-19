@@ -228,15 +228,31 @@
     const draftStore = config.draftStore;
     const onListed = typeof config.onListed === 'function' ? config.onListed : () => {};
 
+    function markChanged(reason) {
+      if (!/changed/i.test(String(reason || ''))) return;
+      const summary = documentLike && documentLike.querySelector && documentLike.querySelector('.r4g3-prm-inline-summary');
+      if (summary) summary.textContent = 'VALUES CHANGED • Press PREPARE RENTAL again';
+    }
+
     function canList(propertyId) {
       const id = Number(propertyId);
       const routeId = R4G3FormCore.parseLeasePropertyId(windowLike && windowLike.location);
       if (!Number.isInteger(id) || id <= 0 || routeId !== id) return false;
       const draft = draftStore.loadFor(id);
       if (!draft) return false;
-      const form = R4G3FormCore.findLeaseForm(documentLike);
-      if (!form) return false;
-      const submit = R4G3FormCore.findLeaseSubmitButton(documentLike, form.root);
+
+      const verified = R4G3FormCore.verifyPreparedLeaseForm({
+        document: documentLike,
+        window: windowLike,
+        location: windowLike.location,
+        draft
+      });
+      if (!verified.verified) {
+        markChanged(verified.reason);
+        return false;
+      }
+
+      const submit = R4G3FormCore.findLeaseSubmitButton(documentLike, verified.form.root);
       if (!submit) return false;
       if (submit.disabled) return false;
       if (submit.getAttribute && submit.getAttribute('aria-disabled') === 'true') return false;
@@ -245,7 +261,10 @@
 
     function list(propertyId) {
       const id = Number(propertyId);
-      if (!canList(id)) return { submitted: false, reason: 'Matching prepared lease form is not ready' };
+      const routeId = R4G3FormCore.parseLeasePropertyId(windowLike && windowLike.location);
+      if (!Number.isInteger(id) || id <= 0 || routeId !== id) {
+        return { submitted: false, reason: 'Matching prepared lease form is not ready' };
+      }
       const draft = draftStore.loadFor(id);
       if (!draft) return { submitted: false, reason: 'No pending lease draft' };
 
@@ -258,11 +277,57 @@
       if (result.submitted) {
         draftStore.clear();
         onListed(result, draft);
+      } else {
+        markChanged(result.reason);
       }
       return result;
     }
 
     return Object.freeze({ canList, list });
+  }
+
+  function decorateRentalActions(options) {
+    const config = options || {};
+    const documentLike = config.document;
+    const canListProperty = typeof config.canListProperty === 'function' ? config.canListProperty : () => false;
+    if (!documentLike || typeof documentLike.querySelectorAll !== 'function') return 0;
+
+    let decorated = 0;
+    for (const row of documentLike.querySelectorAll('[data-property-id]')) {
+      const prepare = row.querySelector('[data-action="set-price"]');
+      const list = row.querySelector('[data-action="list-property"]');
+      if (!prepare || !list) continue;
+
+      prepare.textContent = 'PREPARE RENTAL';
+      prepare.title = 'Open Torn lease options and fill the prepared 100-day rental values';
+
+      const propertyId = Number(row.getAttribute('data-property-id'));
+      const ready = canListProperty(propertyId);
+      list.disabled = !ready;
+      list.style.opacity = ready ? '1' : '0.45';
+      list.title = ready
+        ? 'Verify the visible Torn values and list this property once'
+        : 'Press PREPARE RENTAL first and keep Torn\'s prepared values unchanged.';
+
+      let status = row.querySelector('[data-role="staged-rental-status"]');
+      if (ready) {
+        if (!status) {
+          status = documentLike.createElement('div');
+          status.setAttribute('data-role', 'staged-rental-status');
+          status.style.gridColumn = '1 / -1';
+          status.style.fontWeight = '700';
+          status.style.marginTop = '2px';
+          const actions = list.parentElement;
+          if (actions && actions.parentElement === row) row.insertBefore(status, actions);
+          else row.appendChild(status);
+        }
+        status.textContent = 'READY TO LIST • 100 days • visible Torn values verified';
+      } else if (status && status.parentNode) {
+        status.remove();
+      }
+      decorated += 1;
+    }
+    return decorated;
   }
 
   function start(windowLike) {
@@ -273,12 +338,16 @@
     const draftStore = R4G3DraftCore.createStore(win.sessionStorage);
     const apiFetch = createApiFetch(win);
     let controller = null;
+    let refreshRentalActions = () => {};
     const leasePreparer = createLeasePreparer({
       window: win,
       document: win.document,
       draftStore,
       onPrepared() {
-        if (controller) controller.render();
+        if (controller) {
+          controller.render();
+          refreshRentalActions();
+        }
       }
     });
     const leaseLister = createLeaseLister({
@@ -312,23 +381,34 @@
       }
     });
 
+    refreshRentalActions = () => decorateRentalActions({
+      document: win.document,
+      canListProperty(propertyId) {
+        return leaseLister.canList(propertyId);
+      }
+    });
+
     const launcher = createLauncher({
       window: win,
       document: win.document,
       onOpen() {
         controller.open();
+        refreshRentalActions();
       }
     });
 
     const onHashChange = () => {
       leasePreparer.prepareWithWait();
       controller.render();
+      refreshRentalActions();
       launcher.ensure();
     };
     win.addEventListener('hashchange', onHashChange);
     leasePreparer.prepareWithWait();
     launcher.start();
-    controller.load().catch(() => {
+    controller.load().then(() => {
+      refreshRentalActions();
+    }).catch(() => {
       // The controller renders a sanitized error state. Never log the API key-bearing error.
     });
 
@@ -337,6 +417,7 @@
       leasePreparer,
       leaseLister,
       launcher,
+      refreshRentalActions,
       destroy() {
         win.removeEventListener('hashchange', onHashChange);
         leasePreparer.stop();
@@ -353,6 +434,7 @@
     createLauncher,
     createLeasePreparer,
     createLeaseLister,
+    decorateRentalActions,
     start
   });
 }));

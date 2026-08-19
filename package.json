@@ -1,6 +1,6 @@
 {
   "name": "torn-property-rental-manager",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Standalone Torn rental manager for exact-match market pricing and explicit property listing",
   "scripts": {

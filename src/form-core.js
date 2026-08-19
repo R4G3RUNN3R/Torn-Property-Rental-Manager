@@ -10,6 +10,13 @@
     return Number.isInteger(number) && number > 0 ? number : 0;
   }
 
+  function inputIntegerValue(input) {
+    const raw = String(input && input.value != null ? input.value : '').trim();
+    if (!raw) return 0;
+    const digits = raw.replace(/[^0-9]/g, '');
+    return positiveInteger(digits);
+  }
+
   function parseLeasePropertyId(locationLike) {
     const hash = String(locationLike && locationLike.hash || '');
     if (!hash.includes('p=options') || !hash.includes('tab=lease')) return null;
@@ -58,8 +65,9 @@
     else input.value = String(value);
 
     if (win && typeof win.Event === 'function') {
-      input.dispatchEvent(new win.Event('input', { bubbles: true }));
-      input.dispatchEvent(new win.Event('change', { bubbles: true }));
+      for (const eventName of ['input', 'change', 'keyup', 'blur']) {
+        input.dispatchEvent(new win.Event(eventName, { bubbles: true }));
+      }
     }
   }
 
@@ -92,6 +100,17 @@
     return summary;
   }
 
+  function draftLeaseValues(draft) {
+    if (!draft || typeof draft !== 'object') return null;
+    const days = positiveInteger(draft.days);
+    const suppliedTotal = positiveInteger(draft.totalCost);
+    const suppliedDaily = positiveInteger(draft.dailyPrice);
+    if (!days || days > 365 || (!suppliedTotal && !suppliedDaily)) return null;
+    const totalCost = suppliedTotal || days * suppliedDaily;
+    const dailyPrice = suppliedDaily || Math.max(1, Math.floor(totalCost / days));
+    return { days, totalCost, dailyPrice };
+  }
+
   function prepareLeaseForm(options) {
     const config = options || {};
     const documentLike = config.document;
@@ -105,30 +124,71 @@
       return { prepared: false, reason: 'Draft does not match this property' };
     }
 
-    const days = positiveInteger(draft.days);
-    const suppliedTotal = positiveInteger(draft.totalCost);
-    const suppliedDaily = positiveInteger(draft.dailyPrice);
-    if (!days || days > 365 || (!suppliedTotal && !suppliedDaily)) {
-      return { prepared: false, reason: 'Invalid lease draft' };
-    }
+    const values = draftLeaseValues(draft);
+    if (!values) return { prepared: false, reason: 'Invalid lease draft' };
 
     const form = findLeaseForm(documentLike);
     if (!form) return { prepared: false, reason: 'Form not recognized' };
 
-    const totalCost = suppliedTotal || days * suppliedDaily;
-    const dailyPrice = suppliedDaily || Math.max(1, Math.floor(totalCost / days));
-    setNativeValue(form.daysInput, days, windowLike);
-    setNativeValue(form.costInput, totalCost, windowLike);
-    const summary = upsertSummary(form.root, Object.assign({}, draft, { days, dailyPrice }), totalCost);
+    setNativeValue(form.daysInput, values.days, windowLike);
+    setNativeValue(form.costInput, values.totalCost, windowLike);
+    const summary = upsertSummary(form.root, Object.assign({}, draft, {
+      days: values.days,
+      dailyPrice: values.dailyPrice
+    }), values.totalCost);
 
     return {
       prepared: true,
       propertyId,
-      days,
-      dailyPrice,
-      totalCost,
+      days: values.days,
+      dailyPrice: values.dailyPrice,
+      totalCost: values.totalCost,
       form,
       summary
+    };
+  }
+
+  function verifyPreparedLeaseForm(options) {
+    const config = options || {};
+    const documentLike = config.document;
+    const windowLike = config.window;
+    const locationLike = config.location || windowLike && windowLike.location;
+    const draft = config.draft && typeof config.draft === 'object' ? config.draft : null;
+    const propertyId = parseLeasePropertyId(locationLike);
+
+    if (!propertyId) return { verified: false, reason: 'Not a lease route' };
+    if (!draft || positiveInteger(draft.propertyId) !== propertyId) {
+      return { verified: false, reason: 'Draft does not match this property' };
+    }
+
+    const values = draftLeaseValues(draft);
+    if (!values) return { verified: false, reason: 'Invalid lease draft' };
+
+    const form = findLeaseForm(documentLike);
+    if (!form) return { verified: false, reason: 'Form not recognized' };
+
+    const actualDays = inputIntegerValue(form.daysInput);
+    const actualTotalCost = inputIntegerValue(form.costInput);
+    if (actualDays !== values.days || actualTotalCost !== values.totalCost) {
+      return {
+        verified: false,
+        reason: 'Prepared lease values changed; press PREPARE RENTAL again',
+        propertyId,
+        expectedDays: values.days,
+        expectedTotalCost: values.totalCost,
+        actualDays,
+        actualTotalCost,
+        form
+      };
+    }
+
+    return {
+      verified: true,
+      propertyId,
+      days: values.days,
+      dailyPrice: values.dailyPrice,
+      totalCost: values.totalCost,
+      form
     };
   }
 
@@ -138,22 +198,16 @@
     const windowLike = config.window;
     const locationLike = config.location || windowLike && windowLike.location;
     const draft = config.draft && typeof config.draft === 'object' ? config.draft : null;
-    const propertyId = parseLeasePropertyId(locationLike);
 
-    if (!propertyId) return { submitted: false, reason: 'Not a lease route' };
-    if (!draft || positiveInteger(draft.propertyId) !== propertyId) {
-      return { submitted: false, reason: 'Draft does not match this property' };
-    }
-
-    const prepared = prepareLeaseForm({
+    const verified = verifyPreparedLeaseForm({
       document: documentLike,
       window: windowLike,
       location: locationLike,
       draft
     });
-    if (!prepared.prepared) return { submitted: false, reason: prepared.reason };
+    if (!verified.verified) return { submitted: false, reason: verified.reason };
 
-    const submitButton = findLeaseSubmitButton(documentLike, prepared.form.root);
+    const submitButton = findLeaseSubmitButton(documentLike, verified.form.root);
     if (!submitButton) return { submitted: false, reason: 'Submit control not recognized' };
     if (submitButton.disabled || submitButton.getAttribute && submitButton.getAttribute('aria-disabled') === 'true') {
       return { submitted: false, reason: 'Submit control is disabled' };
@@ -162,9 +216,9 @@
     submitButton.click();
     return {
       submitted: true,
-      propertyId,
-      days: prepared.days,
-      totalCost: prepared.totalCost
+      propertyId: verified.propertyId,
+      days: verified.days,
+      totalCost: verified.totalCost
     };
   }
 
@@ -173,6 +227,7 @@
     findLeaseForm,
     findLeaseSubmitButton,
     setNativeValue,
+    verifyPreparedLeaseForm,
     prepareLeaseForm,
     submitLeaseFromUserGesture
   });

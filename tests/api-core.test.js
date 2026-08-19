@@ -191,7 +191,7 @@ test('market scan starts all unique market requests without waiting for earlier 
 test('market scan preserves successful markets when another property type fails and reports progress', async () => {
   const progress = [];
   const client = ApiCore.createClient({
-    apiKey: 'k',
+    apiKey: 'test-api-key',
     fetchImpl: async url => {
       if (url.includes('/market/11/')) throw new Error('network down');
       return okJson({ rentals: [{ id: Number(url.match(/\/market\/(\d+)\//)[1]) }] });

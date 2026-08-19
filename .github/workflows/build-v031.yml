@@ -1,0 +1,42 @@
+name: build-v031
+
+on:
+  push:
+    branches:
+      - fix/v0.3.1-rate-owner-resize-images
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.event.head_commit.message != 'build: generate v0.3.1 release'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release branch
+        uses: actions/checkout@v4
+        with:
+          ref: fix/v0.3.1-rate-owner-resize-images
+          fetch-depth: 0
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Set v0.3.1 package version
+        run: npm version 0.3.1 --no-git-tag-version
+      - name: Build deterministic userscript
+        run: npm run build
+      - name: Verify release before commit
+        run: |
+          npm test
+          npm run check
+          npm run build:check
+      - name: Commit generated release
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json R4G3RUNN3R-Property-Rental-Manager.user.js
+          git commit -m "build: generate v0.3.1 release"
+          git push origin HEAD:fix/v0.3.1-rate-owner-resize-images

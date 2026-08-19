@@ -281,15 +281,44 @@
     }
 
     async function scanMarkets(properties, options) {
+      const scanOptions = options || {};
+      const onProgress = typeof scanOptions.onProgress === 'function' ? scanOptions.onProgress : null;
       const ids = [...new Set((Array.isArray(properties) ? properties : [])
         .map(property => positiveInt(property && property.propertyTypeId))
         .filter(Boolean))]
         .sort((a, b) => a - b);
 
       const markets = {};
-      for (const id of ids) {
-        markets[id] = await fetchRentalMarket(id, options || {});
-      }
+      let done = 0;
+
+      await Promise.all(ids.map(async id => {
+        let market;
+        try {
+          market = await fetchRentalMarket(id, scanOptions);
+        } catch (error) {
+          market = {
+            rentals: [],
+            property: null,
+            rentals_timestamp: null,
+            rentals_delay: null,
+            fetchedAt: now(),
+            fromCache: false,
+            error: redact(error && error.message || error, apiKey)
+          };
+        }
+
+        markets[id] = market;
+        done += 1;
+        if (onProgress) {
+          onProgress({
+            id,
+            done,
+            total: ids.length,
+            market
+          });
+        }
+      }));
+
       return markets;
     }
 

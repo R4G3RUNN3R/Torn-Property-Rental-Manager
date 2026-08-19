@@ -74,7 +74,7 @@
       raw.owner_id != null ? raw.owner_id : ''
     );
 
-    if (currentUserId != null && ownerId && ownerId !== String(currentUserId)) {
+    if (currentUserId != null && ownerId !== String(currentUserId)) {
       return null;
     }
 

@@ -12,10 +12,10 @@ function release() {
   return fs.readFileSync(releasePath, 'utf8');
 }
 
-test('release userscript has narrow Torn properties metadata and v0.3.1 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.3.2 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.3\.1/);
+  assert.match(source, /@version\s+0\.3\.2/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
@@ -30,6 +30,16 @@ test('release supports one explicit LIST PROPERTY click without automatic form s
   assert.match(source, /submitButton\.click\(\)/);
   assert.match(source, /data-action['"]?:?\s*['"]list-property|createButton\('LIST PROPERTY', 'list-property'\)/);
   assert.match(source, /if \(action === 'list-property'\)/);
+});
+
+test('release verifies staged visible Torn values before LIST PROPERTY can submit', () => {
+  const source = release();
+  assert.match(source, /function verifyPreparedLeaseForm/);
+  assert.match(source, /Prepared lease values changed; press PREPARE RENTAL again/);
+  assert.match(source, /R4G3FormCore\.verifyPreparedLeaseForm/);
+  assert.match(source, /PREPARE RENTAL/);
+  assert.match(source, /READY TO LIST/);
+  assert.match(source, /\['input', 'change', 'keyup', 'blur'\]/);
 });
 
 test('release never places an API key in a URL', () => {
@@ -47,7 +57,7 @@ test('userscript network adapter rejects non-api.torn.com requests', () => {
   assert.doesNotMatch(source, /GM_xmlhttpRequest\s*\(\s*\{[^}]*url:\s*['"`]https:\/\/www\.torn\.com/is);
 });
 
-test('release keeps SET PRICE preparation armed until explicit LIST PROPERTY', () => {
+test('release keeps PREPARE RENTAL draft armed until explicit verified LIST PROPERTY', () => {
   const source = release();
   assert.match(source, /R4G3FormCore\.parseLeasePropertyId/);
   assert.match(source, /R4G3FormCore\.prepareLeaseForm/);

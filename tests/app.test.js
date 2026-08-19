@@ -23,15 +23,6 @@ function makeDom() {
   });
 }
 
-function rentals(base) {
-  return Array.from({ length: 8 }, (_, i) => ({
-    id: i + 1,
-    happy: 4500,
-    modifications: [],
-    cost_per_day: base + i * 1000
-  }));
-}
-
 function propertyRows() {
   return [
     {
@@ -54,57 +45,50 @@ function propertyRows() {
       id: 201,
       property: { id: 10, name: 'Castle' },
       owner: { id: 3877028 },
-      happy: 4500,
+      happy: 5000,
       status: 'for_rent',
       modifications: ['Hot Tub']
     }
   ];
 }
 
-function makeApiClient() {
+function islandRentals() {
+  return [
+    { modifications: [], cost: 90_000, rental_period: 30, cost_per_day: 3000 },
+    { modifications: [], cost: 210_000, rental_period: 60, cost_per_day: 3500 },
+    { modifications: [], cost: 400_000, rental_period: 100, cost_per_day: 4000 },
+    { modifications: ['Hot Tub'], cost: 900_000, rental_period: 100, cost_per_day: 9000 }
+  ];
+}
+
+function makeApiClient(scanOptions) {
   return {
     async fetchOwnedProperties() { return propertyRows(); },
-    async scanMarkets() {
+    async scanMarkets(_properties, options) {
+      if (scanOptions) scanOptions.push(options || {});
       return {
-        13: { rentals: rentals(2_500_000), rentals_timestamp: 123, fetchedAt: 1000, fromCache: false },
-        10: { rentals: rentals(1_000_000), rentals_timestamp: 124, fetchedAt: 1000, fromCache: false }
+        13: { rentals: islandRentals(), rentals_timestamp: 123, fetchedAt: 1000, fromCache: false },
+        10: {
+          rentals: [
+            { modifications: ['Hot Tub'], cost: 500_000, rental_period: 100, cost_per_day: 5000 }
+          ],
+          rentals_timestamp: 124,
+          fetchedAt: 1000,
+          fromCache: false
+        }
       };
     }
   };
 }
 
-test('loads owned properties and renders pricing without exposing the API key', async () => {
-  const dom = makeDom();
-  const storage = memoryStorage();
-  const draftStore = { save() { throw new Error('not used'); }, loadFor() { return null; }, clear() {} };
-  App.saveSettings(storage, { apiKey: 'secret-api-key', theme: 'dark', mode: 'simple' });
-
-  const controller = App.createController({
-    window: dom.window,
-    document: dom.window.document,
-    storage,
-    apiClient: makeApiClient(),
-    propertyCore: PropertyCore,
-    marketCore: MarketCore,
-    draftStore,
-    navigate() {}
-  });
-
-  await controller.load();
-
-  const panel = dom.window.document.querySelector('#r4g3-prm-panel');
-  assert.ok(panel);
-  assert.match(panel.textContent, /Private Island/);
-  assert.match(panel.textContent, /2,487,500/);
-  assert.equal(panel.textContent.includes('secret-api-key'), false);
-  assert.equal(panel.classList.contains('r4g3-prm-theme-dark'), true);
-});
-
-test('only status none receives Prepare Lease and click saves exactly one property draft', async () => {
-  const dom = makeDom();
+function createController(options = {}) {
+  const dom = options.dom || makeDom();
+  const storage = options.storage || memoryStorage();
   const saved = [];
   const navigations = [];
-  const draftStore = {
+  const listCalls = [];
+  let listReady = Boolean(options.listReady);
+  const draftStore = options.draftStore || {
     save(draft) { saved.push(draft); return draft; },
     loadFor() { return null; },
     clear() {}
@@ -113,99 +97,110 @@ test('only status none receives Prepare Lease and click saves exactly one proper
   const controller = App.createController({
     window: dom.window,
     document: dom.window.document,
-    storage: memoryStorage(),
-    apiClient: makeApiClient(),
+    storage,
+    apiClient: options.apiClient || makeApiClient(options.scanOptions),
     propertyCore: PropertyCore,
     marketCore: MarketCore,
     draftStore,
-    navigate(url) { navigations.push(url); }
+    navigate(url) { navigations.push(url); },
+    canListProperty(id) { return listReady && id === 101; },
+    listProperty(id) { listCalls.push(id); return { submitted: true, propertyId: id }; }
   });
 
+  return {
+    dom,
+    storage,
+    controller,
+    saved,
+    navigations,
+    listCalls,
+    setListReady(value) { listReady = Boolean(value); controller.render(); }
+  };
+}
+
+test('renders exact-match low high average and proposed 100-day rent without analytics clutter', async () => {
+  const { dom, controller } = createController();
   await controller.load();
 
-  const buttons = [...dom.window.document.querySelectorAll('[data-action="prepare-lease"]')];
-  assert.equal(buttons.length, 1);
-  assert.equal(buttons[0].dataset.propertyId, '101');
-  assert.match(dom.window.document.querySelector('[data-property-id="102"]').textContent, /rented/i);
-  assert.match(dom.window.document.querySelector('[data-property-id="201"]').textContent, /for rent/i);
+  const row = dom.window.document.querySelector('[data-property-id="101"]');
+  assert.ok(row);
+  assert.match(row.textContent, /Exact matches:\s*3/i);
+  assert.match(row.textContent, /Lowest 100-day:\s*\$300,000/i);
+  assert.match(row.textContent, /Highest 100-day:\s*\$400,000/i);
+  assert.match(row.textContent, /Average 100-day:\s*\$350,000/i);
+  assert.match(row.textContent, /Proposed 100-day rent:\s*\$348,250/i);
+  assert.doesNotMatch(row.textContent, /Median|Q1|Q3|Average similarity|Confidence/i);
+});
 
-  buttons[0].dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
+test('SET PRICE saves the exact proposed 100-day total and opens the native lease route', async () => {
+  const { dom, controller, saved, navigations } = createController();
+  await controller.load();
+
+  const row = dom.window.document.querySelector('[data-property-id="101"]');
+  const setPrice = row.querySelector('[data-action="set-price"]');
+  assert.ok(setPrice);
+  setPrice.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }));
 
   assert.equal(saved.length, 1);
   assert.equal(saved[0].propertyId, 101);
-  assert.equal(saved[0].days, 30);
-  assert.ok(saved[0].dailyPrice > 0);
+  assert.equal(saved[0].days, 100);
+  assert.equal(saved[0].totalCost, 348_250);
   assert.equal(navigations.length, 1);
   assert.equal(navigations[0], 'https://www.torn.com/properties.php#/p=options&ID=101&tab=lease');
 });
 
-test('advanced mode exposes market diagnostics and persists mode/theme settings', async () => {
-  const dom = makeDom();
-  const storage = memoryStorage();
-  const controller = App.createController({
-    window: dom.window,
-    document: dom.window.document,
-    storage,
-    apiClient: makeApiClient(),
-    propertyCore: PropertyCore,
-    marketCore: MarketCore,
-    draftStore: { save(d) { return d; }, loadFor() { return null; }, clear() {} },
-    navigate() {}
-  });
+test('LIST PROPERTY is disabled until the matching native lease form is armed and then fires once', async () => {
+  const context = createController();
+  await context.controller.load();
 
-  await controller.load();
-  assert.equal(dom.window.document.querySelectorAll('.r4g3-prm-advanced').length, 0);
+  let listButton = context.dom.window.document.querySelector('[data-property-id="101"] [data-action="list-property"]');
+  assert.ok(listButton);
+  assert.equal(listButton.disabled, true);
+  listButton.click();
+  assert.equal(context.listCalls.length, 0);
 
-  controller.setMode('advanced');
-  controller.setTheme('light');
-
-  const panel = dom.window.document.querySelector('#r4g3-prm-panel');
-  assert.ok(dom.window.document.querySelector('.r4g3-prm-advanced'));
-  assert.match(panel.textContent, /Median/i);
-  assert.match(panel.textContent, /Comparables/i);
-  assert.equal(panel.classList.contains('r4g3-prm-theme-light'), true);
-
-  const settings = App.loadSettings(storage);
-  assert.equal(settings.mode, 'advanced');
-  assert.equal(settings.theme, 'light');
+  context.setListReady(true);
+  listButton = context.dom.window.document.querySelector('[data-property-id="101"] [data-action="list-property"]');
+  assert.equal(listButton.disabled, false);
+  listButton.click();
+  assert.deepEqual(context.listCalls, [101]);
 });
 
-test('settings normalize pricing bounds and geometry persists', () => {
-  const storage = memoryStorage();
-  App.saveSettings(storage, {
-    apiKey: 'k',
-    days: 999,
-    undercutPercent: -10,
-    minimumMedianRatio: 5,
-    geometry: { left: 123, top: 45, width: 777, height: 555 }
-  });
+test('new-rental actions are not shown for rented or already-listed properties', async () => {
+  const { dom, controller } = createController();
+  await controller.load();
 
-  const settings = App.loadSettings(storage);
-  assert.equal(settings.days, 365);
-  assert.equal(settings.undercutPercent, 0);
-  assert.equal(settings.minimumMedianRatio, 1);
-  assert.deepEqual(settings.geometry, { left: 123, top: 45, width: 777, height: 555 });
+  for (const id of [102, 201]) {
+    const row = dom.window.document.querySelector(`[data-property-id="${id}"]`);
+    assert.ok(row);
+    assert.equal(row.querySelector('[data-action="set-price"]'), null);
+    assert.equal(row.querySelector('[data-action="list-property"]'), null);
+  }
 });
 
-test('desktop shell is explicitly movable and resizable', async () => {
+test('no exact upgrade matches produces no proposed price and no rental action', async () => {
   const dom = makeDom();
-  const controller = App.createController({
-    window: dom.window,
-    document: dom.window.document,
-    storage: memoryStorage(),
-    apiClient: makeApiClient(),
-    propertyCore: PropertyCore,
-    marketCore: MarketCore,
-    draftStore: { save(d) { return d; }, loadFor() { return null; }, clear() {} },
-    navigate() {}
-  });
-
+  const apiClient = {
+    async fetchOwnedProperties() {
+      return [{
+        id: 301,
+        property: { id: 13, name: 'Private Island' },
+        owner: { id: 3877028 },
+        happy: 4500,
+        status: 'none',
+        modifications: ['Hot Tub']
+      }];
+    },
+    async scanMarkets() {
+      return { 13: { rentals: islandRentals().filter(row => row.modifications.length === 0) } };
+    }
+  };
+  const { controller } = createController({ dom, apiClient });
   await controller.load();
-  const panel = dom.window.document.querySelector('#r4g3-prm-panel');
-  const handle = dom.window.document.querySelector('[data-role="drag-handle"]');
-  assert.equal(panel.style.resize, 'both');
-  assert.ok(handle);
-  assert.equal(handle.style.cursor, 'move');
+
+  const row = dom.window.document.querySelector('[data-property-id="301"]');
+  assert.match(row.textContent, /No exact market matches/i);
+  assert.equal(row.querySelector('[data-action="set-price"]'), null);
 });
 
 test('load failure is rendered without leaking the configured API key', async () => {
@@ -223,7 +218,9 @@ test('load failure is rendered without leaking the configured API key', async ()
     propertyCore: PropertyCore,
     marketCore: MarketCore,
     draftStore: { save(d) { return d; }, loadFor() { return null; }, clear() {} },
-    navigate() {}
+    navigate() {},
+    canListProperty() { return false; },
+    listProperty() { return { submitted: false }; }
   });
 
   await assert.rejects(() => controller.load(), /Rejected key/);

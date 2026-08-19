@@ -2135,6 +2135,7 @@
     const windowLike = config.window;
     const documentLike = config.document;
     const onOpen = typeof config.onOpen === 'function' ? config.onOpen : () => {};
+    const onEnsure = typeof config.onEnsure === 'function' ? config.onEnsure : () => {};
     let observer = null;
 
     function makeButton(id, floating) {
@@ -2169,6 +2170,11 @@
       return button;
     }
 
+    function finishEnsure(button) {
+      onEnsure();
+      return button;
+    }
+
     function ensure() {
       if (!documentLike || !documentLike.body) return null;
       let sidebar = documentLike.getElementById('r4g3-prm-sidebar-launcher');
@@ -2183,7 +2189,7 @@
           host.appendChild(sidebar);
         }
         if (floating && floating.parentNode) floating.remove();
-        return sidebar;
+        return finishEnsure(sidebar);
       }
 
       if (sidebar && sidebar.parentNode) sidebar.remove();
@@ -2191,7 +2197,7 @@
         floating = makeButton('r4g3-prm-floating-launcher', true);
         documentLike.body.appendChild(floating);
       }
-      return floating;
+      return finishEnsure(floating);
     }
 
     function start() {
@@ -2289,7 +2295,8 @@
     function markChanged(reason) {
       if (!/changed/i.test(String(reason || ''))) return;
       const summary = documentLike && documentLike.querySelector && documentLike.querySelector('.r4g3-prm-inline-summary');
-      if (summary) summary.textContent = 'VALUES CHANGED • Press PREPARE RENTAL again';
+      const message = 'VALUES CHANGED • Press PREPARE RENTAL again';
+      if (summary && summary.textContent !== message) summary.textContent = message;
     }
 
     function canList(propertyId) {
@@ -2346,8 +2353,10 @@
 
   function decorateRentalActions(options) {
     const config = options || {};
+    const windowLike = config.window;
     const documentLike = config.document;
     const canListProperty = typeof config.canListProperty === 'function' ? config.canListProperty : () => false;
+    const onPrepareRental = typeof config.onPrepareRental === 'function' ? config.onPrepareRental : null;
     if (!documentLike || typeof documentLike.querySelectorAll !== 'function') return 0;
 
     let decorated = 0;
@@ -2356,10 +2365,19 @@
       const list = row.querySelector('[data-action="list-property"]');
       if (!prepare || !list) continue;
 
-      prepare.textContent = 'PREPARE RENTAL';
+      const propertyId = Number(row.getAttribute('data-property-id'));
+      if (prepare.textContent !== 'PREPARE RENTAL') prepare.textContent = 'PREPARE RENTAL';
       prepare.title = 'Open Torn lease options and fill the prepared 100-day rental values';
 
-      const propertyId = Number(row.getAttribute('data-property-id'));
+      if (onPrepareRental && prepare.dataset.r4g3PrepareHook !== '1') {
+        prepare.dataset.r4g3PrepareHook = '1';
+        prepare.addEventListener('click', () => {
+          const run = () => onPrepareRental(propertyId);
+          if (windowLike && typeof windowLike.setTimeout === 'function') windowLike.setTimeout(run, 0);
+          else Promise.resolve().then(run);
+        });
+      }
+
       const ready = canListProperty(propertyId);
       list.disabled = !ready;
       list.style.opacity = ready ? '1' : '0.45';
@@ -2379,7 +2397,8 @@
           if (actions && actions.parentElement === row) row.insertBefore(status, actions);
           else row.appendChild(status);
         }
-        status.textContent = 'READY TO LIST • 100 days • visible Torn values verified';
+        const readyText = 'READY TO LIST • 100 days • visible Torn values verified';
+        if (status.textContent !== readyText) status.textContent = readyText;
       } else if (status && status.parentNode) {
         status.remove();
       }
@@ -2440,9 +2459,13 @@
     });
 
     refreshRentalActions = () => decorateRentalActions({
+      window: win,
       document: win.document,
       canListProperty(propertyId) {
         return leaseLister.canList(propertyId);
+      },
+      onPrepareRental() {
+        leasePreparer.prepareWithWait();
       }
     });
 
@@ -2451,6 +2474,9 @@
       document: win.document,
       onOpen() {
         controller.open();
+        refreshRentalActions();
+      },
+      onEnsure() {
         refreshRentalActions();
       }
     });

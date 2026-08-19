@@ -25,6 +25,15 @@ function leaseDom(propertyId = 101) {
   });
 }
 
+function prepare(dom, draft) {
+  return FormCore.prepareLeaseForm({
+    window: dom.window,
+    document: dom.window.document,
+    location: dom.window.location,
+    draft
+  });
+}
+
 test('lease preparer fills the matching form but keeps the draft armed for LIST PROPERTY', () => {
   const dom = leaseDom(101);
   const draft = { propertyId: 101, days: 100, totalCost: 331_667, dailyPrice: 3316 };
@@ -49,7 +58,7 @@ test('lease preparer fills the matching form but keeps the draft armed for LIST 
   assert.equal(dom.window.document.querySelector('li.cost input').value, '331667');
 });
 
-test('lease lister arms only for matching route/draft/form and clears after one explicit list action', () => {
+test('lease lister arms only for matching route/draft/verified form and clears after one explicit list action', () => {
   const dom = leaseDom(101);
   const draft = { propertyId: 101, days: 100, totalCost: 331_667, dailyPrice: 3316 };
   let clears = 0;
@@ -62,6 +71,7 @@ test('lease lister arms only for matching route/draft/form and clears after one 
     loadFor(id) { return id === 101 ? draft : null; },
     clear() { clears += 1; }
   };
+  assert.equal(prepare(dom, draft).prepared, true);
   const lister = Bootstrap.createLeaseLister({
     window: dom.window,
     document: dom.window.document,
@@ -77,7 +87,7 @@ test('lease lister arms only for matching route/draft/form and clears after one 
   assert.equal(clears, 1);
 });
 
-test('lease lister never submits automatically merely because it is armed', () => {
+test('lease lister never submits automatically merely because a verified form is armed', () => {
   const dom = leaseDom(101);
   const draft = { propertyId: 101, days: 100, totalCost: 331_667, dailyPrice: 3316 };
   let clicks = 0;
@@ -85,6 +95,7 @@ test('lease lister never submits automatically merely because it is armed', () =
     clicks += 1;
     event.preventDefault();
   });
+  assert.equal(prepare(dom, draft).prepared, true);
   const lister = Bootstrap.createLeaseLister({
     window: dom.window,
     document: dom.window.document,

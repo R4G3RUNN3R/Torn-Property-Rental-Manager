@@ -139,8 +139,12 @@
     };
     let panel = null;
     let dragCleanup = null;
+    let resizeCleanup = null;
     let resizeObserver = null;
     let settingsOpen = false;
+    let cachedApiClient = null;
+    let cachedApiKey = '';
+    let activeLoadPromise = null;
 
     function isMobile() {
       return Number(windowLike.innerWidth) <= MOBILE_BREAKPOINT;
@@ -154,10 +158,13 @@
     function getApiClient() {
       if (apiClientFactory) {
         if (!settings.apiKey) return null;
+        if (cachedApiClient && cachedApiKey === settings.apiKey) return cachedApiClient;
         const client = apiClientFactory(settings.apiKey);
         if (!client || typeof client.fetchOwnedProperties !== 'function' || typeof client.scanMarkets !== 'function') {
           throw new TypeError('apiClientFactory returned an invalid client');
         }
+        cachedApiClient = client;
+        cachedApiKey = settings.apiKey;
         return client;
       }
       return fixedApiClient;
@@ -347,10 +354,37 @@
       row.style.gridTemplateColumns = 'repeat(auto-fit, minmax(175px, 1fr))';
       row.style.gap = '8px 14px';
 
+      const identity = el(documentLike, 'div');
+      identity.style.gridColumn = '1 / -1';
+      identity.style.display = 'flex';
+      identity.style.alignItems = 'center';
+      identity.style.gap = '12px';
+      identity.style.minWidth = '0';
+
+      const imageUrl = typeof propertyCore.propertyImageUrl === 'function' ? propertyCore.propertyImageUrl(property.name) : '';
+      if (imageUrl) {
+        const image = el(documentLike, 'img', {
+          attrs: {
+            src: imageUrl,
+            alt: `${property.name} property`,
+            'data-role': 'property-image'
+          }
+        });
+        image.style.width = '112px';
+        image.style.height = '74px';
+        image.style.objectFit = 'cover';
+        image.style.borderRadius = '7px';
+        image.style.border = '1px solid rgba(128,128,128,0.3)';
+        image.style.flex = '0 0 auto';
+        image.loading = 'lazy';
+        image.addEventListener('error', () => { image.style.display = 'none'; }, { once: true });
+        identity.appendChild(image);
+      }
+
       const title = el(documentLike, 'strong', { text: `${property.name} #${property.id}` });
-      title.style.gridColumn = '1 / -1';
       title.style.fontSize = '14px';
-      row.appendChild(title);
+      identity.appendChild(title);
+      row.appendChild(identity);
 
       addCell(row, 'Status', labelStatus(property.status));
       addCell(row, 'Happy', money(property.happy));
@@ -651,10 +685,80 @@
       }
     }
 
+    function renderResizeHandle(container) {
+      if (isMobile() || settings.uiState === 'minimized') return;
+      const handle = el(documentLike, 'div', {
+        attrs: {
+          'data-role': 'resize-handle',
+          title: 'Drag to resize Property Rental Manager',
+          'aria-label': 'Resize Property Rental Manager'
+        }
+      });
+      handle.style.position = 'absolute';
+      handle.style.right = '1px';
+      handle.style.bottom = '1px';
+      handle.style.width = '20px';
+      handle.style.height = '20px';
+      handle.style.cursor = 'nwse-resize';
+      handle.style.zIndex = '4';
+      handle.style.borderRight = settings.theme === 'light' ? '3px solid #0d5c19' : '3px solid #74ff8b';
+      handle.style.borderBottom = settings.theme === 'light' ? '3px solid #0d5c19' : '3px solid #74ff8b';
+      handle.style.borderRadius = '0 0 8px 0';
+      handle.style.boxSizing = 'border-box';
+      container.appendChild(handle);
+    }
+
+    function attachExplicitResize(node) {
+      if (isMobile() || settings.uiState === 'minimized') return;
+      const handle = node.querySelector('[data-role="resize-handle"]');
+      if (!handle) return;
+      let resizing = false;
+      let startX = 0;
+      let startY = 0;
+      let originWidth = 0;
+      let originHeight = 0;
+
+      const onMove = event => {
+        if (!resizing) return;
+        const width = integer(originWidth + event.clientX - startX, 360, 3000, originWidth);
+        const height = integer(originHeight + event.clientY - startY, 260, 2400, originHeight);
+        node.style.width = `${width}px`;
+        node.style.height = `${height}px`;
+      };
+      const onUp = () => {
+        if (!resizing) return;
+        resizing = false;
+        persistGeometryFromPanel();
+      };
+      const onDown = event => {
+        if (event.button != null && event.button !== 0) return;
+        resizing = true;
+        startX = event.clientX;
+        startY = event.clientY;
+        originWidth = node.offsetWidth || parseInt(node.style.width, 10) || settings.geometry.width;
+        originHeight = node.offsetHeight || parseInt(node.style.height, 10) || settings.geometry.height;
+        if (typeof event.preventDefault === 'function') event.preventDefault();
+        if (typeof event.stopPropagation === 'function') event.stopPropagation();
+      };
+
+      handle.addEventListener('mousedown', onDown);
+      windowLike.addEventListener('mousemove', onMove);
+      windowLike.addEventListener('mouseup', onUp);
+      resizeCleanup = () => {
+        handle.removeEventListener('mousedown', onDown);
+        windowLike.removeEventListener('mousemove', onMove);
+        windowLike.removeEventListener('mouseup', onUp);
+      };
+    }
+
     function render() {
       if (dragCleanup) {
         dragCleanup();
         dragCleanup = null;
+      }
+      if (resizeCleanup) {
+        resizeCleanup();
+        resizeCleanup = null;
       }
       if (resizeObserver) {
         resizeObserver.disconnect();
@@ -676,16 +780,18 @@
         if (!renderStatus(panel)) {
           for (const row of state.rows) renderRow(row, panel);
         }
+        renderResizeHandle(panel);
       }
 
       documentLike.body.appendChild(panel);
       attachPanelEvents(panel);
       attachDrag(panel);
       attachResize(panel);
+      attachExplicitResize(panel);
       return panel;
     }
 
-    async function load(options) {
+    async function performLoad(options) {
       if (apiClientFactory && !settings.apiKey) {
         settingsOpen = true;
         state = {
@@ -706,8 +812,11 @@
       state = Object.assign({}, state, { loading: true, error: null, needsApiKey: false, actionMessage: '', scanProgress: null });
       render();
       try {
+        const currentUserId = typeof apiClient.fetchCurrentUserId === 'function'
+          ? await apiClient.fetchCurrentUserId()
+          : null;
         const rawProperties = await apiClient.fetchOwnedProperties();
-        const properties = propertyCore.normalizeProperties(rawProperties, null);
+        const properties = propertyCore.normalizeProperties(rawProperties, currentUserId);
         const typeIds = [...new Set(properties.map(property => Number(property.propertyTypeId)).filter(Boolean))];
         state = Object.assign({}, state, {
           properties,
@@ -740,6 +849,14 @@
       }
     }
 
+    function load(options) {
+      if (activeLoadPromise) return activeLoadPromise;
+      activeLoadPromise = performLoad(options).finally(() => {
+        activeLoadPromise = null;
+      });
+      return activeLoadPromise;
+    }
+
     function setTheme(theme) {
       persistSettings({ theme });
       render();
@@ -759,6 +876,10 @@
 
     function setApiKey(apiKey) {
       persistSettings({ apiKey: String(apiKey || '').trim() });
+      if (cachedApiKey !== settings.apiKey) {
+        cachedApiClient = null;
+        cachedApiKey = '';
+      }
       state = Object.assign({}, state, { needsApiKey: apiClientFactory ? !settings.apiKey : false, error: null });
       settingsOpen = true;
       render();
@@ -767,6 +888,7 @@
 
     function destroy() {
       if (dragCleanup) dragCleanup();
+      if (resizeCleanup) resizeCleanup();
       if (resizeObserver) resizeObserver.disconnect();
       if (panel && panel.parentNode) panel.remove();
       panel = null;

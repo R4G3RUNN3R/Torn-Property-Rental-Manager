@@ -1,8 +1,8 @@
 {
   "name": "torn-property-rental-manager",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "private": true,
-  "description": "Standalone Torn rental manager for exact-match market pricing and explicit property listing",
+  "description": "Standalone Torn rental manager for configurable exact-match market pricing and explicit property listing",
   "scripts": {
     "build": "node scripts/build-userscript.js",
     "build:check": "node scripts/build-userscript.js --check",

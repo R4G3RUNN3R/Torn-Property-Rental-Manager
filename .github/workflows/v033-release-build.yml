@@ -1,0 +1,45 @@
+name: v033-release-build
+
+on:
+  push:
+    branches:
+      - feature/v0.3.3-ui-settings-polish
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/v0.3.3-ui-settings-polish
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+      - name: Refresh lock metadata
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build deterministic userscript
+        run: npm run build
+      - name: Verify release before commit
+        run: |
+          npm test
+          npm run check
+          npm run build:check
+      - name: Commit generated release files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json R4G3RUNN3R-Property-Rental-Manager.user.js
+          if git diff --cached --quiet; then
+            echo "Release files already current"
+          else
+            git commit -m "build: regenerate v0.3.3 userscript"
+            git push origin HEAD:feature/v0.3.3-ui-settings-polish
+          fi

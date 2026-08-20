@@ -12,10 +12,10 @@ function release() {
   return fs.readFileSync(releasePath, 'utf8');
 }
 
-test('release userscript has narrow Torn properties metadata and v0.3.2 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.3.3 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.3\.2/);
+  assert.match(source, /@version\s+0\.3\.3/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
@@ -69,13 +69,19 @@ test('release keeps PREPARE RENTAL draft armed until explicit verified LIST PROP
   assert.match(source, /MutationObserver/);
 });
 
-test('release contains current nested rental parsing and 100-day quote workflow', () => {
+test('release contains current exact-match 100-day pricing and v0.3.3 strategy controls', () => {
   const source = release();
   assert.match(source, /body\.rentals\.listings/);
   assert.match(source, /function exactModificationMatch/);
   assert.match(source, /function rentalQuote/);
   assert.match(source, /targetDays:\s*TARGET_DAYS/);
-  assert.match(source, /Proposed 100-day rent/);
+  assert.match(source, /pricingBasis/);
+  assert.match(source, /Lowest market price/);
+  assert.match(source, /Median market price/);
+  assert.match(source, /Average market price/);
+  assert.match(source, /Highest market price/);
+  assert.match(source, /r4g3-prm-settings-window/);
+  assert.match(source, /LISTED FOR RENT/);
 });
 
 test('build script declares every source module in deterministic order', () => {
@@ -88,6 +94,8 @@ test('build script declares every source module in deterministic order', () => {
     'src/draft-core.js',
     'src/form-core.js',
     'src/app.js',
+    'src/ui-core-v033.js',
+    'src/app-v033.js',
     'src/bootstrap.js'
   ];
   let last = -1;

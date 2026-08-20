@@ -178,10 +178,14 @@
   function rentalQuote(owned, listings, settings) {
     const options = Object.assign({
       targetDays: 100,
-      undercutPercent: 0.5
+      undercutPercent: 0.5,
+      pricingBasis: 'average'
     }, settings || {});
     const targetDays = Math.max(1, Math.floor(number(options.targetDays, 100)) || 100);
     const undercutPercent = Math.max(0, number(options.undercutPercent, 0.5));
+    const pricingBasis = ['lowest', 'median', 'average', 'highest'].includes(options.pricingBasis)
+      ? options.pricingBasis
+      : 'average';
     const rows = (Array.isArray(listings) ? listings : [])
       .map(normalizeRental)
       .filter(row => exactModificationMatch(owned && owned.modifications, row.modifications))
@@ -195,24 +199,41 @@
         targetDays,
         exactMatchCount: 0,
         lowestTotal: null,
+        medianTotal: null,
         highestTotal: null,
         averageTotal: null,
+        pricingBasis,
+        pricingBaseTotal: null,
         proposedTotal: null,
         exactMatches: []
       };
     }
 
-    const totals = rows.map(row => row.equivalentTotal);
+    const totals = rows.map(row => row.equivalentTotal).sort((a, b) => a - b);
     const rawAverage = totals.reduce((sum, value) => sum + value, 0) / totals.length;
+    const lowestTotal = Math.floor(totals[0]);
+    const medianTotal = integerMedian(totals);
+    const averageTotal = Math.floor(rawAverage);
+    const highestTotal = Math.floor(totals[totals.length - 1]);
+    const bases = {
+      lowest: lowestTotal,
+      median: medianTotal,
+      average: averageTotal,
+      highest: highestTotal
+    };
+    const pricingBaseTotal = bases[pricingBasis];
     const multiplier = Math.max(0, 1 - undercutPercent / 100);
 
     return {
       targetDays,
       exactMatchCount: rows.length,
-      lowestTotal: Math.floor(Math.min(...totals)),
-      highestTotal: Math.floor(Math.max(...totals)),
-      averageTotal: Math.floor(rawAverage),
-      proposedTotal: Math.floor(rawAverage * multiplier),
+      lowestTotal,
+      medianTotal,
+      highestTotal,
+      averageTotal,
+      pricingBasis,
+      pricingBaseTotal,
+      proposedTotal: Math.floor(pricingBaseTotal * multiplier),
       exactMatches: rows
     };
   }

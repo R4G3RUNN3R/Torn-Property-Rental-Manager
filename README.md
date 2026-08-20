@@ -1,68 +1,124 @@
 # Torn Property Rental Manager
 
-A standalone Torn.com userscript by **R4G3RUNN3R** for pricing and listing properties you own using the Torn rental market.
+A standalone Torn.com userscript by **R4G3RUNN3R** for pricing and listing properties you own using Torn's rental market.
 
-## What v0.3.2 does
+## v0.3.3
 
-For each property positively verified as belonging to the API-key owner, the manager:
+The manager scans rentals for the same property type, keeps only listings with the **exact same upgrades/modifications**, and normalizes every accepted listing to an equivalent **100-day rental total**:
 
-1. Scans the Torn rental market for the same property type.
-2. Keeps only listings with the **exact same modification / upgrade set** as your property.
-3. Accepts comparable rentals of any duration.
-4. Converts every comparable to an equivalent **100-day rental total**:
+`100-day equivalent = (listing total cost / listing rental period) * 100`
 
-   `100-day equivalent = (listing total cost / listing rental period) * 100`
+It then exposes four market figures:
 
-5. Shows the **lowest**, **highest**, and **average** 100-day totals across the exact matches.
-6. Proposes a 100-day rental amount at **0.5% below the average** by default:
+- **Lowest market price**
+- **Median market price**
+- **Average market price**
+- **Highest market price**
 
-   `proposed rent = floor(average 100-day total * 0.995)`
+The user chooses which figure should be the pricing basis. The configured undercut percentage is applied to that selected raw market figure and the final proposed rent is rounded down to a whole dollar.
 
-7. Uses a staged two-click native Torn rental workflow:
-   - **PREPARE RENTAL** stores the proposed 100-day total, opens the matching native Torn lease page, waits for Torn's form to appear, then fills the period and exact total.
-   - **LIST PROPERTY** becomes available only when the matching draft, route, visible values and native Torn submit control all verify correctly.
+Default behavior remains **Average market price minus 0.5%**, so upgrading from v0.3.2 does not silently change the pricing strategy.
 
-If the market contains no exact-upgrade matches, the manager does not invent a price.
+### New in v0.3.3
 
-### New in v0.3.2
+- Pricing-basis dropdown: **Lowest / Median / Average / Highest**.
+- Configurable undercut percentage, including **0%** to use the selected market basis exactly.
+- Property cards display low, median, average, high and the formula used for the proposed 100-day rent.
+- Property sorting options: Recommended, name A-Z/Z-A, proposed rent high/low, happiness high/low and Property ID.
+- Properties already listed for rent stay below unlisted properties regardless of the chosen sort.
+- A successfully submitted listing is marked **LISTED FOR RENT** and moved to the absolute bottom immediately, without waiting for another Torn API scan.
+- Failed listing attempts do not change property order or listed state.
+- The main desktop title bar is a larger drag surface while controls remain excluded from dragging.
+- Main-window movement is constrained to keep the manager recoverable on-screen.
+- The existing resize behavior and persisted desktop geometry remain intact.
+- Inline settings are replaced by a **gear button** that opens a separate settings window.
+- The Settings window is independently movable/resizable on desktop and responsive on mobile.
+- Appearance settings: Dark/Light theme, Comfortable/Compact density, property images Show/Hide and Full/Compact market detail.
+- API-key controls live at the bottom of Settings. A stored API key is never rendered back into the DOM.
+- Cleaner cards, stronger price hierarchy, status badges, spacing and restrained Torn-adjacent styling.
 
-- Renames the first rental action to **PREPARE RENTAL** to make the two-stage workflow explicit.
-- Fills Torn's native lease inputs using the native `HTMLInputElement.value` setter.
-- Dispatches `input`, `change`, `keyup` and `blur` after each prepared value so Torn's own UI code sees the update.
-- Keeps the existing short wait/retry bridge while Torn's SPA renders the lease form.
-- Shows **READY TO LIST** when the current Torn form is still armed and verified for that property.
-- Adds a verification-only second stage: **LIST PROPERTY no longer rewrites the form before submitting**.
-- The visible Torn rental days and total cost must still exactly match the prepared draft before the final native listing click is allowed.
-- Harmless Torn formatting such as `$331,667` is accepted as the same value.
-- If you manually change the days or total after preparation, listing is blocked, the edited values are left untouched, and the inline status tells you to press **PREPARE RENTAL** again.
-- A failed verification keeps the short-lived draft available so re-preparing is deliberate rather than destructive.
-- The final native listing button is still clicked exactly once and only from the user's explicit **LIST PROPERTY** action.
+## Rental safety workflow
 
-### Included from v0.3.1
+v0.3.3 deliberately preserves the v0.3.2 staged native workflow.
 
-- Conservative pacing: **75 Torn API request starts per rolling 60 seconds** and at least **800 ms between request starts**.
-- One API client/scheduler per configured key instead of resetting the request allowance on every refresh.
-- No overlapping full scans.
-- Torn error code **5 / Too many requests** causes a **60-second cooldown** before bounded retry.
-- API-owner identity verification rejects spouse-owned, other-player-owned and unverified-owner property rows.
-- Visible persistent desktop resize handle.
-- Torn-hosted property artwork thumbnails without extra Torn API calls.
+1. **PREPARE RENTAL** stores the exact proposed 100-day total, opens the matching Torn lease page and fills Torn's visible rental-period and total-cost inputs.
+2. **LIST PROPERTY** is a second explicit user action. It verifies the route, draft, visible values and native Torn listing control before clicking Torn's native final button exactly once.
 
-### Included from v0.3
+If the visible Torn days or total are changed after preparation, LIST PROPERTY refuses to submit and leaves the user's edited values untouched. **PREPARE RENTAL** must be pressed again deliberately.
 
-- Faster market scans: unique property-type requests are queued together while the scheduler controls request starts.
-- Progressive `done / total` scan status.
-- Partial market failures remain isolated and can be retried with **RETRY MARKET**.
-- Normal **Refresh** reuses fresh cached market data.
-- **Force Market Refresh** bypasses the rental-market cache deliberately.
-- Rentable properties appear first.
-- Cached/live market-source indicators.
-- Persistent **Minimize**, **Close**, window position and dimensions.
-- Torn **Information** launcher with floating fallback and SPA rerender recovery.
+No timer, MutationObserver, page load, refresh, retry callback or form-preparation step may trigger the native final listing action.
+
+## Settings
+
+Open the gear button in the manager title bar.
+
+### Pricing
+
+- Rental period: **100 days fixed**
+- Pricing basis: Lowest / Median / Average / Highest
+- Undercut: **0% to 25%**
+- Default: **Average minus 0.5%**
+
+Changing pricing settings recalculates already-loaded market data immediately. It does not make an unnecessary market API request just to change the formula.
+
+### Property sorting
+
+- Recommended
+- Property name A → Z
+- Property name Z → A
+- Proposed rent: highest first
+- Proposed rent: lowest first
+- Happiness: highest first
+- Happiness: lowest first
+- Property ID
+
+Listed-for-rent properties remain in the bottom group. A property successfully listed during the current session is placed after that group immediately.
+
+### Appearance
+
+- Dark / Light theme
+- Comfortable / Compact card density
+- Show / Hide property images
+- Full / Compact market detail
+
+### Torn API
+
+API-key controls are kept at the bottom of the Settings window. The saved key remains browser-local, is never rendered back into an input, and is sent only in the `Authorization: ApiKey ...` header to `api.torn.com`.
+
+## Matching and pricing example
+
+A listing at `$100,000` for `30 days` becomes:
+
+- `$100,000 / 30 = $3,333.33...` per day
+- `$333,333.33...` for 100 days
+
+The same conversion is performed for every exact-upgrade match before the low, median, arithmetic average and high are calculated.
+
+If the selected basis is Highest at `$360,000` and the undercut is `0.5%`:
+
+`proposed rent = floor($360,000 * 0.995) = $358,200`
+
+If undercut is `0%`, the selected raw basis is used exactly before whole-dollar rounding.
+
+If there are no exact-upgrade matches, the manager does not invent a price.
+
+## API pacing and ownership boundary
+
+The manager retains the v0.3.1 safeguards:
+
+- **75 Torn API request starts per rolling 60 seconds**
+- at least **800 ms between request starts**
+- no overlapping full scans
+- **60-second cooldown** after Torn error 5 / Too many requests before bounded retry
+- pagination continuation URLs accepted only from `https://api.torn.com/v2/`
+- one API client/scheduler per configured key
+- API-owner identity verification rejects spouse-owned, other-player-owned and unverified-owner property rows
+
+Normal **Refresh** reuses fresh rental-market cache entries. **Force Market Refresh** deliberately bypasses the market cache.
 
 ## Install
 
-The generated installable userscript is:
+Install the generated userscript:
 
 `R4G3RUNN3R-Property-Rental-Manager.user.js`
 
@@ -70,7 +126,7 @@ Main-branch raw userscript:
 
 `https://raw.githubusercontent.com/R4G3RUNN3R/Torn-Property-Rental-Manager/main/R4G3RUNN3R-Property-Rental-Manager.user.js`
 
-The script deliberately remains scoped to:
+The userscript is deliberately scoped to:
 
 `https://www.torn.com/properties.php*`
 
@@ -78,134 +134,10 @@ The script deliberately remains scoped to:
 
 1. Install the userscript in Tampermonkey or another compatible userscript manager.
 2. Open Torn's Properties page.
-3. Open **Settings** in Property Rental Manager.
-4. Enter a **Limited-or-higher Torn API key**.
-5. Save settings and press **Refresh**.
-
-The saved key remains browser-local. The settings UI never renders the saved key back into the page, and the key is sent only in the `Authorization: ApiKey ...` header to `api.torn.com`.
-
-## Ownership boundary
-
-The property request uses Torn's `ownedByUser` filter. The manager also resolves the API-key owner's user ID once and checks each returned property row locally.
-
-When the user ID is known, a property is accepted only when its owner ID exactly equals that user ID. A spouse ID, another player ID, or a missing owner ID is rejected rather than guessed to be yours.
-
-## Rental workflow
-
-For an owned property whose status is `none`, a priced row includes:
-
-- property artwork
-- exact matches
-- lowest 100-day rent
-- highest 100-day rent
-- average 100-day rent
-- proposed 100-day rent
-- market source: Cached or Live
-- **PREPARE RENTAL**
-- **LIST PROPERTY**
-
-Properties already rented, listed for rent, for sale, or in use do not receive new-rental actions.
-
-### PREPARE RENTAL
-
-Pressing **PREPARE RENTAL**:
-
-- saves one short-lived property-specific draft
-- fixes the rental period at **100 days**
-- preserves the exact proposed total amount
-- opens Torn's native lease page for that property
-- waits for the visible lease form when Torn's SPA is still rendering it
-- fills the visible lease-period and total-cost fields using the native input value setter
-- dispatches `input`, `change`, `keyup` and `blur` for both fields
-- leaves Torn's native listing button untouched
-
-When the form, route and values verify correctly, the manager shows **READY TO LIST**.
-
-### LIST PROPERTY
-
-**LIST PROPERTY** is allowed only when all of these are true:
-
-- you are on the matching property's native lease route
-- the matching short-lived draft still exists
-- Torn's visible lease form is recognized
-- the visible rental period still equals the prepared **100 days**
-- the visible total cost still equals the exact prepared total
-- Torn's native listing control exists and is enabled
-
-The second click performs verification only. It does **not** re-fill or silently correct the form.
-
-If either visible value changed, submission is refused and the user's edited Torn values remain exactly as they are. The prepared draft remains available so **PREPARE RENTAL** can be pressed again deliberately.
-
-Only an explicit **LIST PROPERTY** click can trigger Torn's native listing control, exactly once. Opening the page, the form appearing, a timer firing, a MutationObserver running, or a refresh never submits anything.
-
-## Matching and pricing
-
-A comparable is accepted only when its modification set exactly matches your property's modification set. Matching is order-independent.
-
-Different rental durations are allowed because every listing is normalized to the same 100-day basis before comparison.
-
-Example:
-
-- Market listing: `$100,000` for `30 days`
-- Daily equivalent: `$100,000 / 30 = $3,333.33...`
-- 100-day equivalent: `$333,333.33...`
-
-The manager performs this conversion for every exact match, then calculates the low, high and arithmetic average. The final proposed amount is the raw average reduced by the configured undercut percentage and rounded down to a whole dollar.
-
-Default settings:
-
-- rental period: **100 days** fixed
-- average undercut: **0.5%**
-
-## Refresh, resilience and API pacing
-
-A normal **Refresh** reuses fresh rental-market cache entries. **Force Market Refresh** bypasses that cache deliberately.
-
-Market types can be queued together, but every real Torn API request start passes through one shared client scheduler for the configured API key.
-
-Hard request controls:
-
-- minimum **800 ms** between Torn API request starts
-- maximum **75 request starts per rolling 60 seconds**
-- no overlapping full refresh scan
-- **60-second cooldown** after Torn error 5 / Too many requests before retry
-- bounded retries for other transient failures
-- pagination continuation URLs accepted only from `https://api.torn.com/v2/`
-- rental-market responses read from Torn's current `rentals.listings[]` structure
-
-If one property type fails after retries, that failure remains isolated to the affected type. Other completed markets stay displayed and usable.
-
-## Interface
-
-- focused property-by-property landlord view
-- compact Torn-hosted property artwork thumbnails
-- rentable properties first
-- fixed 100-day pricing
-- exact-upgrade match counts
-- low / high / average / proposed 100-day totals
-- cached/live source indicator
-- progressive scan status
-- per-market retry on failure
-- staged **PREPARE RENTAL → READY TO LIST → LIST PROPERTY** workflow
-- movable desktop panel
-- native browser resize plus a visible bottom-right resize handle
-- persistent desktop position, dimensions and open/minimized/closed state
-- Minimize and Close titlebar controls
-- Torn Information launcher plus floating fallback
-- responsive mobile layout
-- dark and light themes
-- readable dark-mode text with green accents
-
-## Safety boundary
-
-The userscript does not perform unattended native Torn actions.
-
-- Market scanning uses Torn API requests.
-- **PREPARE RENTAL** is a manual user action that navigates to and fills the visible native lease form.
-- Form waiting/retry logic may locate and fill the form, but never triggers the listing button.
-- **LIST PROPERTY** is a second manual user action that first verifies the still-visible prepared values and then causes one native listing click.
-- No automatic listing occurs on page load, timers, observers, refreshes, background loops, or form preparation.
-- No CAPTCHA handling, external backend, or telemetry is used.
+3. Open Property Rental Manager.
+4. Click the **gear**.
+5. Enter a **Limited-or-higher Torn API key** in the API section at the bottom.
+6. Save the key and refresh property data.
 
 ## Development
 
@@ -218,20 +150,22 @@ npm run build
 npm run verify
 ```
 
-GitHub Actions runs the full test suite, JavaScript syntax checks, and verifies that the committed userscript exactly matches the deterministic build output.
+GitHub Actions runs the full test suite, JavaScript syntax checks and deterministic userscript build-parity verification.
 
 ## Repository structure
 
 - `src/property-core.js` - property normalization, verified-owner filtering, artwork URL mapping and lease eligibility
-- `src/market-core.js` - exact-upgrade matching and normalized 100-day rental quotes
-- `src/api-core.js` - Torn API client, owner lookup, pagination, caching, market orchestration, cooldown and request scheduling
+- `src/market-core.js` - exact-upgrade matching, normalized 100-day market figures and selectable pricing basis
+- `src/api-core.js` - Torn API client, owner lookup, pagination, caching, cooldown and request scheduling
 - `src/draft-core.js` - short-lived property-specific lease drafts with exact total preservation
-- `src/form-core.js` - native lease preparation, native event dispatch, visible-value verification and explicit user-triggered listing action
-- `src/app.js` - rental-manager UI, persistent client lifetime, window state, resizing and progressive market display
-- `src/bootstrap.js` - userscript startup, Torn-only API transport, launcher integration, staged-rental UI decoration and native-form bridge
+- `src/form-core.js` - native lease preparation, visible-value verification and explicit user-triggered final listing
+- `src/app.js` - stable v0.3.2 rental-manager controller and staged UI foundation
+- `src/ui-core-v033.js` - v0.3.3 settings normalization, sorting and viewport rules
+- `src/app-v033.js` - v0.3.3 settings window, presentation layer, pricing strategy integration and immediate listed-state UI
+- `src/bootstrap.js` - userscript startup, Torn-only transport, launcher integration and native-form bridge
 - `tests/` - Node test suite
 - `scripts/build-userscript.js` - deterministic single-file userscript builder
 
-## v0.3.2 non-goals
+## Non-goals
 
-This release does not buy properties, scan the property sale market for investments, automatically reprice already-listed properties, submit lease extensions, or submit listings without the user's explicit verified listing click.
+The script does not buy properties, automatically reprice already-listed properties, submit lease extensions, bypass Torn controls, handle CAPTCHAs, or submit listings without the user's explicit verified LIST PROPERTY action.

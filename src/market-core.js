@@ -106,6 +106,13 @@
     return Math.floor((sortedValues[middle - 1] + sortedValues[middle]) / 2);
   }
 
+  function rawMedian(sortedValues) {
+    if (!sortedValues.length) return null;
+    const middle = Math.floor(sortedValues.length / 2);
+    if (sortedValues.length % 2) return sortedValues[middle];
+    return (sortedValues[middle - 1] + sortedValues[middle]) / 2;
+  }
+
   function cleanPriceRows(rows) {
     const usable = rows
       .filter(row => number(row.cost_per_day, 0) > 0)
@@ -211,17 +218,24 @@
 
     const totals = rows.map(row => row.equivalentTotal).sort((a, b) => a - b);
     const rawAverage = totals.reduce((sum, value) => sum + value, 0) / totals.length;
-    const lowestTotal = Math.floor(totals[0]);
-    const medianTotal = integerMedian(totals);
-    const averageTotal = Math.floor(rawAverage);
-    const highestTotal = Math.floor(totals[totals.length - 1]);
-    const bases = {
+    const rawBases = {
+      lowest: totals[0],
+      median: rawMedian(totals),
+      average: rawAverage,
+      highest: totals[totals.length - 1]
+    };
+    const lowestTotal = Math.floor(rawBases.lowest);
+    const medianTotal = Math.floor(rawBases.median);
+    const averageTotal = Math.floor(rawBases.average);
+    const highestTotal = Math.floor(rawBases.highest);
+    const displayedBases = {
       lowest: lowestTotal,
       median: medianTotal,
       average: averageTotal,
       highest: highestTotal
     };
-    const pricingBaseTotal = bases[pricingBasis];
+    const pricingBaseTotal = displayedBases[pricingBasis];
+    const rawPricingBase = rawBases[pricingBasis];
     const multiplier = Math.max(0, 1 - undercutPercent / 100);
 
     return {
@@ -233,7 +247,7 @@
       averageTotal,
       pricingBasis,
       pricingBaseTotal,
-      proposedTotal: Math.floor(pricingBaseTotal * multiplier),
+      proposedTotal: Math.floor(rawPricingBase * multiplier),
       exactMatches: rows
     };
   }

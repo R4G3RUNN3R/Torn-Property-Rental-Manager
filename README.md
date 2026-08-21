@@ -2,7 +2,7 @@
 
 A standalone Torn.com userscript by **R4G3RUNN3R** for pricing and managing properties you own using Torn's rental market.
 
-## v0.3.6
+## v0.3.7
 
 The manager compares only rental listings for the **same property type with the exact same upgrades/modifications**, normalizes every comparable to an equivalent **100-day total**, filters statistically extreme prices, and then lets the user choose the cleaned market figure used as the pricing basis.
 
@@ -16,6 +16,16 @@ Available pricing bases:
 - **Highest market price**
 
 The configured undercut percentage is applied to the selected raw figure and the final proposed rent is rounded down to a whole dollar. The default remains **Average market price minus 0.5%**.
+
+### New in v0.3.7
+
+- **UPDATE ALL is deliberately paced.** Rental markets are scanned one property type at a time instead of starting every unique property type concurrently.
+- Bulk scans wait **1.5 seconds between completed property-type market scans**, on top of the existing shared **750 ms minimum request-start spacing** and **80 requests per rolling minute** ceiling.
+- Pagination for the current property type is allowed to finish before the next property type begins, reducing the chance of several market scans piling into the Torn API at once.
+- **UPDATE ALL now has a real global progress bar** showing completed rental markets such as `3 / 12` and a percentage.
+- The bar follows actual market completion events and survives the manager's full-panel rerenders while a bulk update is active.
+- Individual **UPDATE** remains isolated to the selected property and is not slowed by the new bulk-only pacing.
+- Existing manual-update defaults, cancellation safety, outlier protection and PREPARE RENTAL → LIST PROPERTY safeguards remain unchanged.
 
 ### New in v0.3.6
 
@@ -62,7 +72,9 @@ When **Automatic page update** is OFF:
 - opening `properties.php` makes no automatic property/market refresh
 - opening Property Rental Manager makes no automatic property/market refresh
 - **UPDATE** refreshes one property
-- **UPDATE ALL** refreshes all verified owned properties and their relevant rental markets
+- **UPDATE ALL** refreshes all verified owned properties and their relevant rental markets sequentially
+
+During UPDATE ALL, the manager displays a global progress bar showing how many unique rental markets have completed. Bulk market scans pause 1.5 seconds between property types.
 
 The most recent saved snapshot remains visible between page visits.
 
@@ -139,6 +151,7 @@ Properties listed for rent remain in the bottom group. A property successfully l
 - Default: **OFF**
 - OFF keeps updates completely manual
 - ON performs one UPDATE ALL on Properties page load
+- UPDATE ALL scans unique property types sequentially with a visible global progress bar
 
 ### Torn API
 
@@ -147,7 +160,8 @@ API-key controls remain at the bottom of Settings. The saved key remains browser
 The settings window also displays the script's API safety policy:
 
 - **80 requests / rolling minute maximum**
-- **750 ms minimum spacing**
+- **750 ms minimum spacing** between Torn API request starts
+- **1.5 second bulk pause** between completed property-type market scans during UPDATE ALL
 - **60-second rate-limit cooldown**
 
 ## Matching, outlier filtering and pricing example
@@ -177,6 +191,8 @@ Hard request controls:
 
 - maximum **80 request starts per rolling 60 seconds**
 - minimum **750 ms** between Torn API request starts
+- UPDATE ALL processes unique property-type rental markets **sequentially**
+- UPDATE ALL waits **1.5 seconds between completed property-type scans**
 - no overlapping full update scan
 - **60-second cooldown** after Torn error 5 / Too many requests before bounded retry
 - bounded retry for other transient failures
@@ -184,7 +200,7 @@ Hard request controls:
 - one API client/scheduler per configured key
 - API-owner identity verification rejects spouse-owned, other-player-owned and unverified-owner property rows
 
-An individual property update still obtains the verified owned-property state needed to confirm status/ownership, but it refreshes rental-market data only for the selected property's type.
+An individual property update still obtains the verified owned-property state needed to confirm status/ownership, but it refreshes rental-market data only for the selected property's type and does not incur the bulk inter-market delay.
 
 ## Install
 

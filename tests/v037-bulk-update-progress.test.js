@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
 const ApiCore = require('../src/api-core');
-const App = require('../src/app-v034');
+const App = require('../src/app-v037');
 const PropertyCore = require('../src/property-core');
 const MarketCore = require('../src/market-core');
 
@@ -90,6 +90,7 @@ test('UPDATE ALL requests paced sequential markets and renders a real global pro
       async scanMarkets(properties, options) {
         scanOptions = options;
         options.onProgress({ id: 10, done: 1, total: 2, market: { rentals: [] } });
+        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
         progress = dom.window.document.querySelector('[data-role="v037-update-all-progress"]');
         await scanGate;
         options.onProgress({ id: 20, done: 2, total: 2, market: { rentals: [] } });

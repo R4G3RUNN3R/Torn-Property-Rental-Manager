@@ -53,9 +53,13 @@
     const markets = value.markets && typeof value.markets === 'object' && !Array.isArray(value.markets)
       ? value.markets
       : {};
+    const propertyMarkets = value.propertyMarkets && typeof value.propertyMarkets === 'object' && !Array.isArray(value.propertyMarkets)
+      ? value.propertyMarkets
+      : {};
     return {
       properties: value.properties,
       markets,
+      propertyMarkets,
       updatedAt: timestamp(value.updatedAt),
       propertyUpdatedAt: normalizeTimestampMap(value.propertyUpdatedAt)
     };

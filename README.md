@@ -2,7 +2,7 @@
 
 A standalone Torn.com userscript by **R4G3RUNN3R** for pricing and managing properties you own using Torn's rental market.
 
-## v0.3.4
+## v0.3.5
 
 The manager compares only rental listings for the **same property type with the exact same upgrades/modifications**, normalizes every comparable to an equivalent **100-day total**, and lets the user choose the market figure used as the pricing basis.
 
@@ -16,6 +16,16 @@ Available pricing bases:
 - **Highest market price**
 
 The configured undercut percentage is applied to the selected raw figure and the final proposed rent is rounded down to a whole dollar. The default remains **Average market price minus 0.5%**.
+
+### New in v0.3.5
+
+- **Individual UPDATE is isolated:** only the selected property card receives fresh property state, rental-market data and a new timestamp. Another property of the same type keeps its previous snapshot until you update it.
+- Each selected property now shows a visible **search/update progress bar** while its refresh is running.
+- Settings now exposes explicit **MANUAL** and **AUTOMATIC** update-mode buttons. MANUAL remains the default; AUTOMATIC still means one UPDATE ALL on Properties page load, never background polling.
+- The real gear-button settings path is now covered, so update-mode controls appear when Settings is opened normally.
+- Rental cancellation now notices Torn controls rendered asynchronously and searches the full native page instead of assuming a particular market container.
+- Torn's native removal confirmation is handled as another explicit stage: **CANCEL LISTING → CONFIRM CANCEL LISTING → FINAL CONFIRM CANCEL** when Torn presents its confirmation dialog. No observer, timer or callback may click a native cancellation control.
+- Existing **80 requests per rolling minute**, **750 ms minimum spacing**, 60-second rate-limit cooldown and PREPARE RENTAL → LIST PROPERTY safety rules remain unchanged.
 
 ### New in v0.3.4
 

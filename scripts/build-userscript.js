@@ -26,7 +26,7 @@ function metadata() {
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
 // @version      ${packageJson.version}
-// @description  Manage Torn rentals with manual property updates, configurable exact-match pricing, safe cancellation/relisting, and explicit native actions.
+// @description  Manage Torn rentals with isolated property updates, visible progress, explicit update modes, safe cancellation/relisting, and explicit native actions.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
 // @grant        GM_xmlhttpRequest

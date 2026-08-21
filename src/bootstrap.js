@@ -425,6 +425,20 @@
           location: win.location,
           propertyId
         });
+      },
+      canConfirmCancelProperty(propertyId) {
+        return R4G3FormCore.canConfirmRentalCancellation({
+          document: win.document,
+          location: win.location,
+          propertyId
+        });
+      },
+      confirmCancelProperty(propertyId) {
+        return R4G3FormCore.confirmRentalCancellationFromUserGesture({
+          document: win.document,
+          location: win.location,
+          propertyId
+        });
       }
     });
 

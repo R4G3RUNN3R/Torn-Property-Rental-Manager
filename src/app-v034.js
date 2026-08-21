@@ -35,7 +35,6 @@
     const cancellationSent = new Set();
     let updatingAll = false;
     let pendingCancelId = null;
-    let observer = null;
     let destroyed = false;
 
     if (savedSnapshot && typeof baseController.hydrate === 'function') {
@@ -397,14 +396,6 @@
       return node;
     }
 
-    if (windowLike.MutationObserver && documentLike.body) {
-      observer = new windowLike.MutationObserver(() => {
-        enhanceMainPanel();
-        enhanceSettingsWindow();
-      });
-      observer.observe(documentLike.body, { childList: true, subtree: true });
-    }
-
     const controller = Object.assign({}, baseController, {
       load: updateAll,
       updateAll,
@@ -424,8 +415,6 @@
       setAutoPageUpdate,
       destroy() {
         destroyed = true;
-        if (observer) observer.disconnect();
-        observer = null;
         return baseController.destroy();
       }
     });

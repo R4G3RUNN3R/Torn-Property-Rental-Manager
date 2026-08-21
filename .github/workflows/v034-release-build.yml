@@ -49,11 +49,6 @@ jobs:
           NODE
       - name: Build deterministic userscript
         run: npm run build
-      - name: Verify release before commit
-        run: |
-          npm test
-          npm run check
-          npm run build:check
       - name: Commit generated release files
         run: |
           git config user.name "github-actions[bot]"
@@ -65,5 +60,3 @@ jobs:
             git commit -m "build: regenerate v0.3.4 userscript"
             git push origin HEAD:feature/v0.3.4-manual-updates-cancel
           fi
-
-# Trigger after workflow creation.

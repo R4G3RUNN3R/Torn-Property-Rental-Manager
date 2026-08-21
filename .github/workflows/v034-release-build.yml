@@ -1,0 +1,67 @@
+name: v034-release-build
+
+on:
+  push:
+    branches:
+      - feature/v0.3.4-manual-updates-cancel
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/v0.3.4-manual-updates-cancel
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+      - name: Refresh lock metadata
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Update release documentation
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = 'README.md';
+          let source = fs.readFileSync(path, 'utf8');
+          source = source.replace('## What v0.3.2 does', '## What v0.3.4 does');
+          if (!source.includes('### New in v0.3.4')) {
+            const marker = '### New in v0.3.2';
+            const section = `### New in v0.3.4\n\n- **Manual updates by default:** opening Torn Properties or the manager does not refresh the Torn API automatically.\n- Every property card has its own **UPDATE** action, and the header has **UPDATE ALL**.\n- The manager saves the last known property and market snapshot locally so reopening the page can display useful data without an API request.\n- Each property shows a **Last updated** time. Individual updates refresh the verified owned-property state and only that property's rental-market type.\n- Settings now includes **Automatic page update**, default **OFF**. When enabled it performs one UPDATE ALL when the Torn Properties page loads; it never polls in the background.\n- Unaccepted properties with status **for_rent** can be removed from the market through a staged **CANCEL LISTING → CONFIRM CANCEL LISTING** workflow. The second click may invoke Torn's native remove control exactly once.\n- After a cancellation is sent, the manager does not silently refresh. **UPDATE PROPERTY** is required to verify Torn has returned the property to an available state before repricing/relisting.\n- Active **rented** leases do not expose cancellation because Torn does not permit early cancellation through this workflow.\n- Shared Torn API pacing is **80 request starts per rolling 60 seconds**, at least **750 ms between starts**, with the existing 60-second cooldown after Torn rate-limit responses.\n- Existing exact-upgrade pricing, configurable Lowest / Median / Average / Highest basis, undercut percentage, sorting, and the staged **PREPARE RENTAL → LIST PROPERTY** safety workflow remain unchanged.\n\n`;
+            if (!source.includes(marker)) throw new Error('README v0.3.2 marker missing');
+            source = source.replace(marker, section + marker);
+          }
+          source = source.replace('75 Torn API request starts per rolling 60 seconds', '80 Torn API request starts per rolling 60 seconds');
+          source = source.replace('at least **800 ms between request starts**', 'at least **750 ms between request starts**');
+          source = source.replace('minimum **800 ms** between Torn API request starts', 'minimum **750 ms** between Torn API request starts');
+          source = source.replace('maximum **75 request starts per rolling 60 seconds**', 'maximum **80 request starts per rolling 60 seconds**');
+          source = source.replace('Save settings and press **Refresh**.', 'Save the API key and press **UPDATE ALL**.');
+          source = source.replace(/## Refresh, resilience and API pacing[\s\S]*?\n## Interface/, `## Updates, resilience and API pacing\n\nThe manager is manual by default. Reopening Torn's Properties page uses the last saved snapshot and makes no update request unless **Automatic page update** is enabled in Settings.\n\n- **UPDATE** refreshes the selected property's verified ownership/status data and refreshes only its property-type rental market.\n- **UPDATE ALL** deliberately refreshes all verified owned properties and the relevant rental markets.\n- **Automatic page update** performs UPDATE ALL once on page load when enabled; there is no interval polling or MutationObserver-driven API refresh.\n- Cancellation and listing actions do not bypass the API scheduler and do not silently trigger a verification refresh.\n\nEvery real Torn API request start passes through one shared client scheduler for the configured API key.\n\nHard request controls:\n\n- minimum **750 ms** between Torn API request starts\n- maximum **80 request starts per rolling 60 seconds**\n- no overlapping full refresh scan\n- **60-second cooldown** after Torn error 5 / Too many requests before retry\n- bounded retries for other transient failures\n- pagination continuation URLs accepted only from \`https://api.torn.com/v2/\`\n- rental-market responses read from Torn's current \`rentals.listings[]\` structure\n\nIf one property type fails after retries, that failure remains isolated to the affected type. Other completed markets stay displayed and usable.\n\n## Interface`);
+          source = source.replace('## v0.3.2 non-goals', '## v0.3.4 non-goals');
+          fs.writeFileSync(path, source, 'utf8');
+          NODE
+      - name: Build deterministic userscript
+        run: npm run build
+      - name: Verify release before commit
+        run: |
+          npm test
+          npm run check
+          npm run build:check
+      - name: Commit generated release files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json README.md R4G3RUNN3R-Property-Rental-Manager.user.js
+          if git diff --cached --quiet; then
+            echo "Release files already current"
+          else
+            git commit -m "build: regenerate v0.3.4 userscript"
+            git push origin HEAD:feature/v0.3.4-manual-updates-cancel
+          fi

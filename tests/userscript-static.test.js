@@ -12,10 +12,10 @@ function release() {
   return fs.readFileSync(releasePath, 'utf8');
 }
 
-test('release userscript has narrow Torn properties metadata and v0.3.5 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.3.6 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.3\.5/);
+  assert.match(source, /@version\s+0\.3\.6/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
@@ -84,6 +84,19 @@ test('release contains current exact-match 100-day pricing and strategy controls
   assert.match(source, /LISTED FOR RENT/);
 });
 
+test('release protects exact-match pricing from extreme normalized market outliers', () => {
+  const source = release();
+  assert.match(source, /function filterEquivalentPriceRows/);
+  assert.match(source, /median\s*\/\s*5/);
+  assert.match(source, /median\s*\*\s*5/);
+  assert.match(source, /1\.5\s*\*\s*iqr/);
+  assert.match(source, /price_data_too_inconsistent/);
+  assert.match(source, /insufficient_market_sample/);
+  assert.match(source, /Outliers ignored:/);
+  assert.match(source, /Exact matches:/);
+  assert.match(source, /Used:/);
+});
+
 test('release defaults to manual updates with optional one-shot automatic page update', () => {
   const source = release();
   assert.match(source, /autoPageUpdate:\s*false/);
@@ -136,6 +149,7 @@ test('build script declares every source module in deterministic order', () => {
     'src/app-v033.js',
     'src/update-core-v034.js',
     'src/app-v034.js',
+    'src/app-v036.js',
     'src/bootstrap.js'
   ];
   let last = -1;

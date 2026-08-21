@@ -2,9 +2,9 @@
 
 A standalone Torn.com userscript by **R4G3RUNN3R** for pricing and managing properties you own using Torn's rental market.
 
-## v0.3.5
+## v0.3.6
 
-The manager compares only rental listings for the **same property type with the exact same upgrades/modifications**, normalizes every comparable to an equivalent **100-day total**, and lets the user choose the market figure used as the pricing basis.
+The manager compares only rental listings for the **same property type with the exact same upgrades/modifications**, normalizes every comparable to an equivalent **100-day total**, filters statistically extreme prices, and then lets the user choose the cleaned market figure used as the pricing basis.
 
 `100-day equivalent = (listing total cost / listing rental period) * 100`
 
@@ -16,6 +16,16 @@ Available pricing bases:
 - **Highest market price**
 
 The configured undercut percentage is applied to the selected raw figure and the final proposed rent is rounded down to a whole dollar. The default remains **Average market price minus 0.5%**.
+
+### New in v0.3.6
+
+- **Outlier protection is always enabled.** Exact-upgrade rental listings are normalized to 100 days before any price is judged.
+- With three or more exact matches, prices more than **5× above** or below **1/5 of** the median are excluded first, then a **1.5× IQR** filter removes remaining statistical extremes where the sample is large enough.
+- Lowest / Median / Average / Highest and the proposed rent are calculated only from the trusted sample.
+- With exactly two exact matches, values more than **5× apart** are treated as **PRICE DATA TOO INCONSISTENT** and no automatic rent is proposed.
+- With only one exact match, the card reports **INSUFFICIENT MARKET SAMPLE** and no automatic rent is proposed.
+- Property cards show **Exact matches / Used / Outliers ignored**, so excluded listings are visible rather than silently discarded.
+- Outlier filtering is local and adds **no Torn API requests**.
 
 ### New in v0.3.5
 
@@ -83,8 +93,9 @@ For a property whose verified status is **for_rent**:
 2. The script opens/uses the matching Torn property lease/options route and waits for Torn's native remove-from-market control.
 3. When the exact native control is recognized and enabled, the action becomes **CONFIRM CANCEL LISTING**.
 4. Only that explicit confirmation may click Torn's native remove control once.
-5. The card shows **CANCELLATION SENT** and requires **UPDATE PROPERTY**.
-6. Once Torn reports the property as available again, normal pricing and **PREPARE RENTAL → LIST PROPERTY** can be used to relist it at the newly calculated price.
+5. If Torn presents a native confirmation dialog, the script exposes **FINAL CONFIRM CANCEL** and only that additional explicit click may confirm it.
+6. The card shows **CANCELLATION SENT** and requires **UPDATE PROPERTY**.
+7. Once Torn reports the property as available again, normal pricing and **PREPARE RENTAL → LIST PROPERTY** can be used to relist it at the newly calculated price.
 
 A property whose status is **rented** does not receive a cancel-listing action.
 
@@ -98,6 +109,7 @@ Open the gear button in the manager title bar.
 - Pricing basis: Lowest / Median / Average / Highest
 - Undercut: **0% to 25%**
 - Default: **Average minus 0.5%**
+- Outlier protection: **always on**
 
 Changing the pricing basis or undercut recalculates already-loaded market data immediately and does not require another market request.
 
@@ -138,22 +150,24 @@ The settings window also displays the script's API safety policy:
 - **750 ms minimum spacing**
 - **60-second rate-limit cooldown**
 
-## Matching and pricing example
+## Matching, outlier filtering and pricing example
 
 A listing at `$100,000` for `30 days` becomes:
 
 - `$100,000 / 30 = $3,333.33...` per day
 - `$333,333.33...` for 100 days
 
-The same conversion is performed for every exact-upgrade match before the low, median, arithmetic average and high are calculated.
+The same conversion is performed for every exact-upgrade match before outlier protection and before the low, median, arithmetic average and high are calculated.
 
-If the selected basis is Highest at `$360,000` and the undercut is `0.5%`:
+For example, normalized exact-match totals of `$1`, `$48,000,000`, `$50,000,000`, `$52,000,000`, and `$1,000,000,000` become a trusted sample of `$48,000,000`, `$50,000,000`, and `$52,000,000`. The `$1` and `$1,000,000,000` listings are ignored as extreme outliers.
 
-`proposed rent = floor($360,000 * 0.995) = $358,200`
+If the selected basis is Highest at `$52,000,000` and the undercut is `0.5%`:
+
+`proposed rent = floor($52,000,000 * 0.995) = $51,740,000`
 
 If undercut is `0%`, the selected raw basis is used exactly before whole-dollar rounding.
 
-If there are no exact-upgrade matches, the manager does not invent a price.
+If there are no exact-upgrade matches, only one exact match, or a tiny contradictory sample that cannot be trusted, the manager does not invent a price.
 
 ## API pacing and ownership boundary
 
@@ -177,67 +191,3 @@ An individual property update still obtains the verified owned-property state ne
 Install the generated userscript:
 
 `R4G3RUNN3R-Property-Rental-Manager.user.js`
-
-Main-branch raw userscript:
-
-`https://raw.githubusercontent.com/R4G3RUNN3R/Torn-Property-Rental-Manager/main/R4G3RUNN3R-Property-Rental-Manager.user.js`
-
-The userscript is deliberately scoped to:
-
-`https://www.torn.com/properties.php*`
-
-## First setup
-
-1. Install the userscript in Tampermonkey or another compatible userscript manager.
-2. Open Torn's Properties page.
-3. Open Property Rental Manager.
-4. Click the **gear**.
-5. Enter a **Limited-or-higher Torn API key** in the API section at the bottom.
-6. Save the key.
-7. Press **UPDATE ALL** to load the first snapshot.
-
-## Safety boundary
-
-The userscript does not perform unattended native Torn listing or cancellation actions.
-
-- Market/property reads use Torn API requests through the shared scheduler.
-- **PREPARE RENTAL** is a manual user action that fills the matching visible native lease form.
-- **LIST PROPERTY** is a second manual action that verifies visible prepared values before one native listing click.
-- **CANCEL LISTING** only prepares/navigates the cancellation flow.
-- **CONFIRM CANCEL LISTING** is the explicit action allowed to click Torn's recognized native remove-from-market control once.
-- Cancellation does not automatically trigger an API verification refresh.
-- Automatic page update, when enabled, only performs read/update requests. It never submits a native listing or cancellation action.
-- No CAPTCHA handling, external backend or telemetry is used.
-
-## Development
-
-Requires Node.js `>=20.19.0`.
-
-```bash
-npm install
-npm test
-npm run build
-npm run verify
-```
-
-GitHub Actions runs the full test suite, JavaScript syntax checks, and verifies that the committed userscript exactly matches the deterministic build output.
-
-## Repository structure
-
-- `src/property-core.js` - property normalization, verified-owner filtering, artwork URL mapping and lease eligibility
-- `src/market-core.js` - exact-upgrade matching and normalized 100-day rental quotes
-- `src/api-core.js` - Torn API client, owner lookup, pagination, caching, cooldown and shared request scheduling
-- `src/draft-core.js` - short-lived property-specific lease drafts
-- `src/form-core.js` - native lease preparation/verification plus explicit native cancellation recognition/action
-- `src/app.js` - stable rental-manager controller and base rendering
-- `src/ui-core-v033.js` - v0.3.3 pricing/sorting/settings helpers
-- `src/app-v033.js` - v0.3.3 settings window, sorting and presentation layer
-- `src/update-core-v034.js` - v0.3.4 update preferences and saved snapshot storage
-- `src/app-v034.js` - v0.3.4 manual update controls, timestamps and cancellation/relisting UI
-- `src/bootstrap.js` - userscript startup, Torn transport, launcher, page-load update policy and native action bridges
-- `tests/` - Node test suite
-- `scripts/build-userscript.js` - deterministic single-file userscript builder
-
-## v0.3.4 non-goals
-
-This release does not buy properties, scan the property sale market for investments, cancel an already-active rental lease, automatically reprice already-listed properties without user actions, submit lease extensions, or submit/cancel listings without the user's explicit native-action confirmation.

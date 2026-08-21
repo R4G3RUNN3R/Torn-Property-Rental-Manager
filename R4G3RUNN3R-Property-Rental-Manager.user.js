@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
-// @version      0.3.5
-// @description  Manage Torn rentals with isolated property updates, visible progress, explicit update modes, safe cancellation/relisting, and explicit native actions.
+// @version      0.3.6
+// @description  Manage Torn rentals with outlier-protected exact-match pricing, isolated property updates, visible progress, explicit update modes, and safe cancellation/relisting.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
 // @grant        GM_xmlhttpRequest
@@ -339,6 +339,69 @@
     };
   }
 
+  function filterEquivalentPriceRows(rows) {
+    const ordered = (Array.isArray(rows) ? rows : [])
+      .slice()
+      .sort((a, b) => a.equivalentTotal - b.equivalentTotal || a.id - b.id);
+
+    if (!ordered.length) {
+      return { rows: [], sampleStatus: 'no_exact_matches', outlierCount: 0 };
+    }
+    if (ordered.length === 1) {
+      return { rows: [], sampleStatus: 'insufficient_market_sample', outlierCount: 0 };
+    }
+    if (ordered.length === 2) {
+      const low = ordered[0].equivalentTotal;
+      const high = ordered[1].equivalentTotal;
+      if (high / low > 5) {
+        return { rows: [], sampleStatus: 'price_data_too_inconsistent', outlierCount: 0 };
+      }
+      return { rows: ordered, sampleStatus: 'ok', outlierCount: 0 };
+    }
+
+    const totals = ordered.map(row => row.equivalentTotal);
+    const median = rawMedian(totals);
+    const medianMin = median / 5;
+    const medianMax = median * 5;
+    let trusted = ordered.filter(row => row.equivalentTotal >= medianMin && row.equivalentTotal <= medianMax);
+
+    if (trusted.length >= 4) {
+      const guardedTotals = trusted.map(row => row.equivalentTotal).sort((a, b) => a - b);
+      const q1 = percentile(guardedTotals, 0.25);
+      const q3 = percentile(guardedTotals, 0.75);
+      const iqr = q3 - q1;
+      const min = q1 - 1.5 * iqr;
+      const max = q3 + 1.5 * iqr;
+      trusted = trusted.filter(row => row.equivalentTotal >= min && row.equivalentTotal <= max);
+    }
+
+    const outlierCount = ordered.length - trusted.length;
+    if (trusted.length < 2) {
+      return { rows: trusted, sampleStatus: 'price_data_too_inconsistent', outlierCount };
+    }
+    return { rows: trusted, sampleStatus: 'ok', outlierCount };
+  }
+
+  function emptyRentalQuote(targetDays, pricingBasis, exactMatches, filtered) {
+    const trusted = filtered && Array.isArray(filtered.rows) ? filtered.rows : [];
+    return {
+      targetDays,
+      exactMatchCount: exactMatches.length,
+      usedMatchCount: trusted.length,
+      outlierCount: filtered ? filtered.outlierCount : 0,
+      sampleStatus: filtered ? filtered.sampleStatus : 'no_exact_matches',
+      lowestTotal: null,
+      medianTotal: null,
+      highestTotal: null,
+      averageTotal: null,
+      pricingBasis,
+      pricingBaseTotal: null,
+      proposedTotal: null,
+      exactMatches,
+      trustedMatches: trusted
+    };
+  }
+
   function rentalQuote(owned, listings, settings) {
     const options = Object.assign({
       targetDays: 100,
@@ -358,22 +421,13 @@
         equivalentTotal: row.cost / row.rental_period * targetDays
       }));
 
-    if (!rows.length) {
-      return {
-        targetDays,
-        exactMatchCount: 0,
-        lowestTotal: null,
-        medianTotal: null,
-        highestTotal: null,
-        averageTotal: null,
-        pricingBasis,
-        pricingBaseTotal: null,
-        proposedTotal: null,
-        exactMatches: []
-      };
+    const filtered = filterEquivalentPriceRows(rows);
+    if (filtered.sampleStatus !== 'ok') {
+      return emptyRentalQuote(targetDays, pricingBasis, rows, filtered);
     }
 
-    const totals = rows.map(row => row.equivalentTotal).sort((a, b) => a - b);
+    const trustedRows = filtered.rows;
+    const totals = trustedRows.map(row => row.equivalentTotal).sort((a, b) => a - b);
     const rawAverage = totals.reduce((sum, value) => sum + value, 0) / totals.length;
     const rawBases = {
       lowest: totals[0],
@@ -398,6 +452,9 @@
     return {
       targetDays,
       exactMatchCount: rows.length,
+      usedMatchCount: trustedRows.length,
+      outlierCount: filtered.outlierCount,
+      sampleStatus: filtered.sampleStatus,
       lowestTotal,
       medianTotal,
       highestTotal,
@@ -405,7 +462,8 @@
       pricingBasis,
       pricingBaseTotal,
       proposedTotal: Math.floor(rawPricingBase * multiplier),
-      exactMatches: rows
+      exactMatches: rows,
+      trustedMatches: trustedRows
     };
   }
 
@@ -417,6 +475,7 @@
     similarity,
     selectComparables,
     marketStats,
+    filterEquivalentPriceRows,
     rentalQuote
   });
 }));
@@ -3985,6 +4044,125 @@
     saveSnapshot: updateCore.saveSnapshot,
     createController
   }));
+}));
+
+/* ===== src/app-v036.js ===== */
+(function (root, factory) {
+  const baseApp = typeof module === 'object' && module.exports ? require('./app-v034') : root.R4G3PropertyRentalApp;
+  const api = factory(baseApp);
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.R4G3PropertyRentalApp = api;
+}(typeof globalThis !== 'undefined' ? globalThis : this, function (baseApp) {
+  'use strict';
+
+  if (!baseApp) throw new Error('v0.3.6 app dependency is unavailable');
+
+  function createController(options) {
+    const config = options || {};
+    const windowLike = config.window;
+    const documentLike = config.document;
+    if (!windowLike || !documentLike) throw new TypeError('window and document are required');
+
+    const baseController = baseApp.createController(config);
+    let observer = null;
+    let scheduled = false;
+    let destroyed = false;
+
+    function sampleText(quote) {
+      const exact = Number(quote && quote.exactMatchCount) || 0;
+      const used = Number(quote && quote.usedMatchCount) || 0;
+      const ignored = Number(quote && quote.outlierCount) || 0;
+      const counts = `Exact matches: ${exact} · Used: ${used} · Outliers ignored: ${ignored}`;
+      if (quote && quote.sampleStatus === 'insufficient_market_sample') {
+        return `INSUFFICIENT MARKET SAMPLE · ${counts}`;
+      }
+      if (quote && quote.sampleStatus === 'price_data_too_inconsistent') {
+        return `PRICE DATA TOO INCONSISTENT · ${counts}`;
+      }
+      return counts;
+    }
+
+    function enhanceMainPanel() {
+      scheduled = false;
+      if (destroyed) return null;
+      const panel = documentLike.getElementById('r4g3-prm-panel');
+      if (!panel) return null;
+      const entries = new Map((baseController.getState().rows || []).map(entry => [
+        Number(entry.property && entry.property.id),
+        entry
+      ]));
+
+      for (const row of panel.querySelectorAll('[data-property-id]')) {
+        const entry = entries.get(Number(row.getAttribute('data-property-id')));
+        const quote = entry && entry.quote;
+        let note = row.querySelector('[data-role="v036-market-sample"]');
+        if (!quote || !Number(quote.exactMatchCount)) {
+          if (note && note.parentNode) note.remove();
+          continue;
+        }
+        if (!note) {
+          note = documentLike.createElement('div');
+          note.dataset.role = 'v036-market-sample';
+          note.style.gridColumn = '1 / -1';
+          note.style.fontSize = '12px';
+          note.style.opacity = '0.82';
+          note.style.padding = '6px 8px';
+          note.style.borderRadius = '7px';
+          note.style.border = '1px solid rgba(128,128,128,0.25)';
+          const controls = row.querySelector('[data-role="v034-card-controls"]');
+          if (controls && controls.parentNode === row) row.insertBefore(note, controls);
+          else row.appendChild(note);
+        }
+        const text = sampleText(quote);
+        if (note.textContent !== text) note.textContent = text;
+        note.style.fontWeight = quote.sampleStatus === 'ok' && !quote.outlierCount ? '500' : '700';
+      }
+      return panel;
+    }
+
+    function scheduleEnhance() {
+      if (scheduled || destroyed) return;
+      scheduled = true;
+      Promise.resolve().then(enhanceMainPanel);
+    }
+
+    if (typeof windowLike.MutationObserver === 'function') {
+      observer = new windowLike.MutationObserver(() => scheduleEnhance());
+      observer.observe(documentLike.body || documentLike.documentElement, { childList: true, subtree: true });
+    }
+
+    async function wrapAsync(method, args) {
+      const result = await baseController[method](...args);
+      enhanceMainPanel();
+      return result;
+    }
+
+    const controller = Object.assign({}, baseController, {
+      load(...args) { return wrapAsync('load', args); },
+      updateAll(...args) { return wrapAsync('updateAll', args); },
+      updateProperty(...args) { return wrapAsync('updateProperty', args); },
+      render() {
+        const result = baseController.render();
+        enhanceMainPanel();
+        return result;
+      },
+      open() {
+        const result = baseController.open();
+        enhanceMainPanel();
+        return result;
+      },
+      destroy() {
+        destroyed = true;
+        if (observer) observer.disconnect();
+        return baseController.destroy();
+      }
+    });
+
+    enhanceMainPanel();
+    return Object.freeze(controller);
+  }
+
+  return Object.freeze(Object.assign({}, baseApp, { createController }));
 }));
 
 /* ===== src/bootstrap.js ===== */

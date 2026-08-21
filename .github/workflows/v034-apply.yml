@@ -1,0 +1,81 @@
+name: v034-apply
+
+on:
+  push:
+    branches:
+      - feature/v0.3.4-manual-updates-cancel
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/v0.3.4-manual-updates-cancel
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+      - name: Apply narrow source patches
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          function edit(path, transform) {
+            const before = fs.readFileSync(path, 'utf8');
+            const after = transform(before);
+            if (after === before) throw new Error(`Patch made no change: ${path}`);
+            fs.writeFileSync(path, after, 'utf8');
+          }
+
+          edit('src/api-core.js', source => source
+            .replace('minGapMs: 800,\n      maxPerMinute: 75,', 'minGapMs: 750,\n      maxPerMinute: 80,')
+            .replace('Number(config.maxPerMinute) || 75', 'Number(config.maxPerMinute) || 80'));
+
+          edit('src/app.js', source => {
+            const marker = `    function setTheme(theme) {\n`;
+            const insertion = `    function hydrate(snapshot) {\n      const source = snapshot && typeof snapshot === 'object' ? snapshot : {};\n      const properties = Array.isArray(source.properties) ? source.properties.slice() : [];\n      const markets = source.markets && typeof source.markets === 'object' && !Array.isArray(source.markets)\n        ? Object.assign({}, source.markets)\n        : {};\n      state = {\n        properties,\n        markets,\n        rows: computeRows(properties, markets),\n        loading: false,\n        error: null,\n        needsApiKey: false,\n        actionMessage: '',\n        scanProgress: null\n      };\n      render();\n      return state;\n    }\n\n    async function updateProperty(propertyId, options) {\n      const id = Number(propertyId);\n      if (!Number.isInteger(id) || id <= 0) throw new TypeError('A positive property ID is required');\n      if (apiClientFactory && !settings.apiKey) {\n        settingsOpen = true;\n        state = Object.assign({}, state, { needsApiKey: true, error: null });\n        render();\n        return state;\n      }\n      const apiClient = getApiClient();\n      state = Object.assign({}, state, { error: null, needsApiKey: false, actionMessage: \\`Updating property \\${id}…\\` });\n      render();\n      try {\n        const currentUserId = typeof apiClient.fetchCurrentUserId === 'function'\n          ? await apiClient.fetchCurrentUserId()\n          : null;\n        const rawProperties = await apiClient.fetchOwnedProperties();\n        const freshProperties = propertyCore.normalizeProperties(rawProperties, currentUserId);\n        const fresh = freshProperties.find(property => Number(property.id) === id);\n        if (!fresh) throw new Error('Property is no longer present in the verified owned-property list');\n\n        let replaced = false;\n        const properties = (state.properties || []).map(property => {\n          if (Number(property.id) !== id) return property;\n          replaced = true;\n          return fresh;\n        });\n        if (!replaced) properties.push(fresh);\n\n        const scanned = await apiClient.scanMarkets([fresh], { force: Boolean(options && options.force) });\n        const markets = Object.assign({}, state.markets || {}, scanned || {});\n        state = Object.assign({}, state, {\n          properties,\n          markets,\n          rows: computeRows(properties, markets),\n          loading: false,\n          error: null,\n          needsApiKey: false,\n          actionMessage: \\`Property \\${id} updated.\\`,\n          scanProgress: null\n        });\n        render();\n        return state;\n      } catch (error) {\n        state = Object.assign({}, state, { error, actionMessage: \\`Property \\${id} update failed.\\` });\n        render();\n        throw error;\n      }\n    }\n\n`;
+            if (!source.includes(marker)) throw new Error('app.js insertion marker missing');
+            source = source.replace(marker, insertion + marker);
+            source = source.replace('      load,\n      render,', '      load,\n      hydrate,\n      updateProperty,\n      render,');
+            return source;
+          });
+
+          edit('src/form-core.js', source => {
+            const marker = `  return Object.freeze({\n`;
+            const insertion = `  function findRentalCancelButton(documentLike) {\n    if (!documentLike || typeof documentLike.querySelectorAll !== 'function') return null;\n    const scope = documentLike.querySelector('#market') || documentLike;\n    const candidates = [...scope.querySelectorAll('button, a, input[type="button"], input[type="submit"]')];\n    return candidates.find(candidate => {\n      if (candidate.closest && candidate.closest('#r4g3-prm-panel, #r4g3-prm-settings-window')) return false;\n      const text = String(\n        candidate.textContent || candidate.value ||\n        candidate.getAttribute && (candidate.getAttribute('aria-label') || candidate.getAttribute('title')) || ''\n      ).replace(/\\s+/g, ' ').trim();\n      return /remove\\s+(?:this\\s+)?(?:property\\s+)?from\\s+(?:the\\s+)?market/i.test(text) ||\n        /(?:remove|cancel|withdraw)\\s+(?:rental\\s+)?listing/i.test(text) ||\n        /^delist$/i.test(text);\n    }) || null;\n  }\n\n  function canCancelRentalListing(options) {\n    const config = options || {};\n    const propertyId = positiveInteger(config.propertyId);\n    const routeId = parseLeasePropertyId(config.location);\n    if (!propertyId || routeId !== propertyId) return false;\n    const button = findRentalCancelButton(config.document);\n    if (!button || button.disabled) return false;\n    if (button.getAttribute && button.getAttribute('aria-disabled') === 'true') return false;\n    return true;\n  }\n\n  function cancelRentalListingFromUserGesture(options) {\n    const config = options || {};\n    const propertyId = positiveInteger(config.propertyId);\n    const routeId = parseLeasePropertyId(config.location);\n    if (!propertyId || routeId !== propertyId) {\n      return { submitted: false, reason: 'Matching rental listing route is not ready' };\n    }\n    const button = findRentalCancelButton(config.document);\n    if (!button) return { submitted: false, reason: 'Remove from market control not recognized' };\n    if (button.disabled || button.getAttribute && button.getAttribute('aria-disabled') === 'true') {\n      return { submitted: false, reason: 'Remove from market control is disabled' };\n    }\n    button.click();\n    return { submitted: true, propertyId };\n  }\n\n`;
+            if (!source.includes(marker)) throw new Error('form-core.js insertion marker missing');
+            source = source.replace(marker, insertion + marker);
+            source = source.replace('    submitLeaseFromUserGesture\n  });', '    submitLeaseFromUserGesture,\n    findRentalCancelButton,\n    canCancelRentalListing,\n    cancelRentalListingFromUserGesture\n  });');
+            return source;
+          });
+
+          edit('src/bootstrap.js', source => {
+            const startMarker = `  function start(windowLike) {\n`;
+            const initial = `  async function runInitialUpdate(controller) {\n    if (!controller || typeof controller.getUpdateSettings !== 'function' || typeof controller.updateAll !== 'function') return false;\n    const settings = controller.getUpdateSettings();\n    if (!settings || settings.autoPageUpdate !== true) return false;\n    await controller.updateAll({ source: 'automatic' });\n    return true;\n  }\n\n`;
+            if (!source.includes(startMarker)) throw new Error('bootstrap start marker missing');
+            source = source.replace(startMarker, initial + startMarker);
+
+            const listingBlock = `      listProperty(propertyId) {\n        return leaseLister.list(propertyId);\n      }\n`;
+            const cancelBlock = `      listProperty(propertyId) {\n        return leaseLister.list(propertyId);\n      },\n      prepareCancelProperty(propertyId) {\n        const id = Number(propertyId);\n        if (!Number.isInteger(id) || id <= 0) return { prepared: false, reason: 'Invalid property ID' };\n        win.location.href = R4G3PropertyCore.leaseUrl(id);\n        return { prepared: true, propertyId: id };\n      },\n      canCancelProperty(propertyId) {\n        return R4G3FormCore.canCancelRentalListing({\n          document: win.document,\n          location: win.location,\n          propertyId\n        });\n      },\n      cancelProperty(propertyId) {\n        return R4G3FormCore.cancelRentalListingFromUserGesture({\n          document: win.document,\n          location: win.location,\n          propertyId\n        });\n      }\n`;
+            if (!source.includes(listingBlock)) throw new Error('bootstrap listing config marker missing');
+            source = source.replace(listingBlock, cancelBlock);
+
+            const oldLoad = `    controller.load().then(() => {\n      refreshRentalActions();\n    }).catch(() => {\n      // The controller renders a sanitized error state. Never log the API key-bearing error.\n    });\n`;
+            const newLoad = `    runInitialUpdate(controller).then(() => {\n      refreshRentalActions();\n    }).catch(() => {\n      // The controller renders a sanitized error state. Never log the API key-bearing error.\n    });\n`;
+            if (!source.includes(oldLoad)) throw new Error('bootstrap automatic load marker missing');
+            source = source.replace(oldLoad, newLoad);
+            source = source.replace('    decorateRentalActions,\n    start', '    decorateRentalActions,\n    runInitialUpdate,\n    start');
+            return source;
+          });
+          NODE
+      - name: Commit patches
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/api-core.js src/app.js src/form-core.js src/bootstrap.js
+          git commit -m "feat: implement v0.3.4 update and cancellation primitives"
+          git push origin HEAD:feature/v0.3.4-manual-updates-cancel

@@ -65,3 +65,5 @@ jobs:
             git commit -m "build: regenerate v0.3.4 userscript"
             git push origin HEAD:feature/v0.3.4-manual-updates-cancel
           fi
+
+# Trigger after workflow creation.

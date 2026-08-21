@@ -321,6 +321,8 @@
     async function scanMarkets(properties, options) {
       const scanOptions = options || {};
       const onProgress = typeof scanOptions.onProgress === 'function' ? scanOptions.onProgress : null;
+      const sequential = scanOptions.sequential === true;
+      const betweenMarketsMs = Math.max(0, Number(scanOptions.betweenMarketsMs) || 0);
       const ids = [...new Set((Array.isArray(properties) ? properties : [])
         .map(property => positiveInt(property && property.propertyTypeId))
         .filter(Boolean))]
@@ -329,7 +331,7 @@
       const markets = {};
       let done = 0;
 
-      await Promise.all(ids.map(async id => {
+      async function scanOne(id) {
         let market;
         try {
           market = await fetchRentalMarket(id, scanOptions);
@@ -355,7 +357,16 @@
             market
           });
         }
-      }));
+      }
+
+      if (sequential) {
+        for (let index = 0; index < ids.length; index += 1) {
+          await scanOne(ids[index]);
+          if (betweenMarketsMs > 0 && index < ids.length - 1) await sleep(betweenMarketsMs);
+        }
+      } else {
+        await Promise.all(ids.map(scanOne));
+      }
 
       return markets;
     }

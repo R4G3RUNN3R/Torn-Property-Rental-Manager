@@ -12,10 +12,10 @@ function release() {
   return fs.readFileSync(releasePath, 'utf8');
 }
 
-test('release userscript has narrow Torn properties metadata and v0.3.6 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.3.7 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.3\.6/);
+  assert.match(source, /@version\s+0\.3\.7/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
@@ -97,6 +97,16 @@ test('release protects exact-match pricing from extreme normalized market outlie
   assert.match(source, /Used:/);
 });
 
+test('release paces UPDATE ALL sequentially and renders a global progress bar', () => {
+  const source = release();
+  assert.match(source, /BULK_MARKET_DELAY_MS\s*=\s*1500/);
+  assert.match(source, /scanOptions\.sequential\s*=\s*true/);
+  assert.match(source, /betweenMarketsMs/);
+  assert.match(source, /v037-update-all-progress/);
+  assert.match(source, /role['"],\s*['"]progressbar/);
+  assert.match(source, /Updating rental markets…/);
+});
+
 test('release defaults to manual updates with optional one-shot automatic page update', () => {
   const source = release();
   assert.match(source, /autoPageUpdate:\s*false/);
@@ -150,6 +160,7 @@ test('build script declares every source module in deterministic order', () => {
     'src/update-core-v034.js',
     'src/app-v034.js',
     'src/app-v036.js',
+    'src/app-v037.js',
     'src/bootstrap.js'
   ];
   let last = -1;

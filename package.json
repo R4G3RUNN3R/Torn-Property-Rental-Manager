@@ -1,8 +1,8 @@
 {
   "name": "torn-property-rental-manager",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "private": true,
-  "description": "Standalone Torn rental manager with adaptive outlier-protected pricing, isolated property updates, progress UI, explicit update modes, safe cancellation/relisting, and API pacing",
+  "description": "Standalone Torn rental manager with paced bulk updates, visible progress, adaptive outlier-protected pricing, isolated property refreshes, safe cancellation/relisting, and API pacing",
   "scripts": {
     "build": "node scripts/build-userscript.js",
     "build:check": "node scripts/build-userscript.js --check",

@@ -79,6 +79,8 @@ test('UPDATE ALL requests paced sequential markets and renders a real global pro
   let releaseScan;
   const scanGate = new Promise(resolve => { releaseScan = resolve; });
   let progress;
+  let markProgressObserved;
+  const progressObserved = new Promise(resolve => { markProgressObserved = resolve; });
 
   const controller = App.createController({
     window: dom.window,
@@ -90,8 +92,8 @@ test('UPDATE ALL requests paced sequential markets and renders a real global pro
       async scanMarkets(properties, options) {
         scanOptions = options;
         options.onProgress({ id: 10, done: 1, total: 2, market: { rentals: [] } });
-        await new Promise(resolve => dom.window.setTimeout(resolve, 0));
         progress = dom.window.document.querySelector('[data-role="v037-update-all-progress"]');
+        markProgressObserved();
         await scanGate;
         options.onProgress({ id: 20, done: 2, total: 2, market: { rentals: [] } });
         return { 10: { rentals: [] }, 20: { rentals: [] } };
@@ -105,7 +107,7 @@ test('UPDATE ALL requests paced sequential markets and renders a real global pro
 
   controller.open();
   const pending = controller.updateAll();
-  await new Promise(resolve => dom.window.setTimeout(resolve, 0));
+  await progressObserved;
 
   assert.equal(scanOptions.sequential, true);
   assert.ok(Number(scanOptions.betweenMarketsMs) >= 1000);

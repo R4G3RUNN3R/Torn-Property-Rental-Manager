@@ -4,7 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
 const MarketCore = require('../src/market-core');
-const App = require('../src/app-v033');
+const App = require('../src/app-v036');
 const PropertyCore = require('../src/property-core');
 
 const owned = { modifications: [] };

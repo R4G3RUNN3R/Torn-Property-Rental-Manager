@@ -16,7 +16,7 @@
       .filter(id => Number.isInteger(id) && id > 0)).size;
   }
 
-  function wrapApiClient(client) {
+  function wrapApiClient(client, afterProgress) {
     if (!client || typeof client.scanMarkets !== 'function') return client;
     return Object.assign({}, client, {
       scanMarkets(properties, options) {
@@ -27,6 +27,16 @@
             BULK_MARKET_DELAY_MS,
             Number(scanOptions.betweenMarketsMs) || 0
           );
+        }
+
+        const originalProgress = typeof scanOptions.onProgress === 'function'
+          ? scanOptions.onProgress
+          : null;
+        if (originalProgress && typeof afterProgress === 'function') {
+          scanOptions.onProgress = entry => {
+            originalProgress(entry);
+            afterProgress(entry);
+          };
         }
         return client.scanMarkets(properties, scanOptions);
       }
@@ -39,19 +49,23 @@
     const documentLike = config.document;
     if (!windowLike || !documentLike) throw new TypeError('window and document are required');
 
-    if (config.apiClient) config.apiClient = wrapApiClient(config.apiClient);
+    let baseController = null;
+    let refreshProgress = () => null;
+    const progressHook = () => refreshProgress();
+
+    if (config.apiClient) config.apiClient = wrapApiClient(config.apiClient, progressHook);
     if (typeof config.apiClientFactory === 'function') {
       const factory = config.apiClientFactory;
-      config.apiClientFactory = apiKey => wrapApiClient(factory(apiKey));
+      config.apiClientFactory = apiKey => wrapApiClient(factory(apiKey), progressHook);
     }
 
-    const baseController = baseApp.createController(config);
+    baseController = baseApp.createController(config);
     let observer = null;
     let scheduled = false;
     let destroyed = false;
 
     function progressState() {
-      const state = baseController.getState();
+      const state = baseController && baseController.getState();
       if (!state || state.loading !== true) return null;
       const scan = state.scanProgress && typeof state.scanProgress === 'object'
         ? state.scanProgress
@@ -131,6 +145,8 @@
       if (fill) fill.style.width = `${state.percent}%`;
       return progress;
     }
+
+    refreshProgress = enhanceBulkProgress;
 
     function scheduleEnhance() {
       if (scheduled || destroyed) return;

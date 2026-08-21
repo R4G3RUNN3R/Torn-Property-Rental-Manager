@@ -19,6 +19,7 @@ const sourceFiles = [
   'src/update-core-v034.js',
   'src/app-v034.js',
   'src/app-v036.js',
+  'src/app-v037.js',
   'src/bootstrap.js'
 ];
 
@@ -27,7 +28,7 @@ function metadata() {
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
 // @version      ${packageJson.version}
-// @description  Manage Torn rentals with outlier-protected exact-match pricing, isolated property updates, visible progress, explicit update modes, and safe cancellation/relisting.
+// @description  Manage Torn rentals with paced bulk updates, visible progress, outlier-protected pricing, isolated property refreshes, and safe native actions.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
 // @grant        GM_xmlhttpRequest

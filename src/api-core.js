@@ -18,14 +18,14 @@
 
   function createScheduler(options) {
     const config = Object.assign({
-      minGapMs: 800,
-      maxPerMinute: 75,
+      minGapMs: 750,
+      maxPerMinute: 80,
       now: () => Date.now(),
       sleep: defaultSleep
     }, options || {});
 
     const minGapMs = Math.max(0, Number(config.minGapMs) || 0);
-    const maxPerMinute = Math.max(1, Math.floor(Number(config.maxPerMinute) || 75));
+    const maxPerMinute = Math.max(1, Math.floor(Number(config.maxPerMinute) || 80));
     const now = config.now;
     const sleep = config.sleep;
     const starts = [];

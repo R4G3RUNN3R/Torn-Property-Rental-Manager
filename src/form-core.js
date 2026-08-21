@@ -222,6 +222,49 @@
     };
   }
 
+  function findRentalCancelButton(documentLike) {
+    if (!documentLike || typeof documentLike.querySelectorAll !== 'function') return null;
+    const scope = documentLike.querySelector('#market') || documentLike;
+    const candidates = [...scope.querySelectorAll('button, a, input[type="button"], input[type="submit"]')];
+    return candidates.find(candidate => {
+      if (candidate.closest && candidate.closest('#r4g3-prm-panel, #r4g3-prm-settings-window')) return false;
+      const text = String(
+        candidate.textContent || candidate.value ||
+        candidate.getAttribute && (candidate.getAttribute('aria-label') || candidate.getAttribute('title')) || ''
+      ).replace(/\s+/g, ' ').trim();
+      return /remove\s+(?:this\s+)?(?:property\s+)?from\s+(?:the\s+)?market/i.test(text) ||
+        /(?:remove|cancel|withdraw)\s+(?:rental\s+)?listing/i.test(text) ||
+        /^delist$/i.test(text);
+    }) || null;
+  }
+
+  function canCancelRentalListing(options) {
+    const config = options || {};
+    const propertyId = positiveInteger(config.propertyId);
+    const routeId = parseLeasePropertyId(config.location);
+    if (!propertyId || routeId !== propertyId) return false;
+    const button = findRentalCancelButton(config.document);
+    if (!button || button.disabled) return false;
+    if (button.getAttribute && button.getAttribute('aria-disabled') === 'true') return false;
+    return true;
+  }
+
+  function cancelRentalListingFromUserGesture(options) {
+    const config = options || {};
+    const propertyId = positiveInteger(config.propertyId);
+    const routeId = parseLeasePropertyId(config.location);
+    if (!propertyId || routeId !== propertyId) {
+      return { submitted: false, reason: 'Matching rental listing route is not ready' };
+    }
+    const button = findRentalCancelButton(config.document);
+    if (!button) return { submitted: false, reason: 'Remove from market control not recognized' };
+    if (button.disabled || button.getAttribute && button.getAttribute('aria-disabled') === 'true') {
+      return { submitted: false, reason: 'Remove from market control is disabled' };
+    }
+    button.click();
+    return { submitted: true, propertyId };
+  }
+
   return Object.freeze({
     parseLeasePropertyId,
     findLeaseForm,
@@ -229,6 +272,9 @@
     setNativeValue,
     verifyPreparedLeaseForm,
     prepareLeaseForm,
-    submitLeaseFromUserGesture
+    submitLeaseFromUserGesture,
+    findRentalCancelButton,
+    canCancelRentalListing,
+    cancelRentalListingFromUserGesture
   });
 }));

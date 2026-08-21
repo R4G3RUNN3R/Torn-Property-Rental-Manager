@@ -857,6 +857,76 @@
       return activeLoadPromise;
     }
 
+    function hydrate(snapshot) {
+      const source = snapshot && typeof snapshot === 'object' ? snapshot : {};
+      const properties = Array.isArray(source.properties) ? source.properties.slice() : [];
+      const markets = source.markets && typeof source.markets === 'object' && !Array.isArray(source.markets)
+        ? Object.assign({}, source.markets)
+        : {};
+      state = {
+        properties,
+        markets,
+        rows: computeRows(properties, markets),
+        loading: false,
+        error: null,
+        needsApiKey: false,
+        actionMessage: '',
+        scanProgress: null
+      };
+      render();
+      return state;
+    }
+
+    async function updateProperty(propertyId, options) {
+      const id = Number(propertyId);
+      if (!Number.isInteger(id) || id <= 0) throw new TypeError('A positive property ID is required');
+      if (apiClientFactory && !settings.apiKey) {
+        settingsOpen = true;
+        state = Object.assign({}, state, { needsApiKey: true, error: null });
+        render();
+        return state;
+      }
+      const apiClient = getApiClient();
+      state = Object.assign({}, state, { error: null, needsApiKey: false, actionMessage: `Updating property ${id}…` });
+      render();
+      try {
+        const currentUserId = typeof apiClient.fetchCurrentUserId === 'function'
+          ? await apiClient.fetchCurrentUserId()
+          : null;
+        const rawProperties = await apiClient.fetchOwnedProperties();
+        const freshProperties = propertyCore.normalizeProperties(rawProperties, currentUserId);
+        const fresh = freshProperties.find(property => Number(property.id) === id);
+        if (!fresh) throw new Error('Property is no longer present in the verified owned-property list');
+
+        let replaced = false;
+        const properties = (state.properties || []).map(property => {
+          if (Number(property.id) !== id) return property;
+          replaced = true;
+          return fresh;
+        });
+        if (!replaced) properties.push(fresh);
+
+        const scanned = await apiClient.scanMarkets([fresh], { force: Boolean(options && options.force) });
+        const markets = Object.assign({}, state.markets || {}, scanned || {});
+        state = Object.assign({}, state, {
+          properties,
+          markets,
+          rows: computeRows(properties, markets),
+          loading: false,
+          error: null,
+          needsApiKey: false,
+          actionMessage: `Property ${id} updated.`,
+          scanProgress: null
+        });
+        render();
+        return state;
+      } catch (error) {
+        state = Object.assign({}, state, { error, actionMessage: `Property ${id} update failed.` });
+        render();
+        throw error;
+      }
+    }
+
     function setTheme(theme) {
       persistSettings({ theme });
       render();
@@ -898,6 +968,8 @@
 
     return Object.freeze({
       load,
+      hydrate,
+      updateProperty,
       render,
       open,
       close: closePanel,

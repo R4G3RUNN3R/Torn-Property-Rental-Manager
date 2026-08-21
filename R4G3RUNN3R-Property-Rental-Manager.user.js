@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
-// @version      0.3.3
-// @description  Price owned Torn rentals from exact market matches with configurable market strategy and an explicit two-click listing workflow.
+// @version      0.3.4
+// @description  Manage Torn rentals with manual property updates, configurable exact-match pricing, safe cancellation/relisting, and explicit native actions.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
 // @grant        GM_xmlhttpRequest
@@ -442,14 +442,14 @@
 
   function createScheduler(options) {
     const config = Object.assign({
-      minGapMs: 800,
-      maxPerMinute: 75,
+      minGapMs: 750,
+      maxPerMinute: 80,
       now: () => Date.now(),
       sleep: defaultSleep
     }, options || {});
 
     const minGapMs = Math.max(0, Number(config.minGapMs) || 0);
-    const maxPerMinute = Math.max(1, Math.floor(Number(config.maxPerMinute) || 75));
+    const maxPerMinute = Math.max(1, Math.floor(Number(config.maxPerMinute) || 80));
     const now = config.now;
     const sleep = config.sleep;
     const starts = [];
@@ -1149,6 +1149,49 @@
     };
   }
 
+  function findRentalCancelButton(documentLike) {
+    if (!documentLike || typeof documentLike.querySelectorAll !== 'function') return null;
+    const scope = documentLike.querySelector('#market') || documentLike;
+    const candidates = [...scope.querySelectorAll('button, a, input[type="button"], input[type="submit"]')];
+    return candidates.find(candidate => {
+      if (candidate.closest && candidate.closest('#r4g3-prm-panel, #r4g3-prm-settings-window')) return false;
+      const text = String(
+        candidate.textContent || candidate.value ||
+        candidate.getAttribute && (candidate.getAttribute('aria-label') || candidate.getAttribute('title')) || ''
+      ).replace(/\s+/g, ' ').trim();
+      return /remove\s+(?:this\s+)?(?:property\s+)?from\s+(?:the\s+)?market/i.test(text) ||
+        /(?:remove|cancel|withdraw)\s+(?:rental\s+)?listing/i.test(text) ||
+        /^delist$/i.test(text);
+    }) || null;
+  }
+
+  function canCancelRentalListing(options) {
+    const config = options || {};
+    const propertyId = positiveInteger(config.propertyId);
+    const routeId = parseLeasePropertyId(config.location);
+    if (!propertyId || routeId !== propertyId) return false;
+    const button = findRentalCancelButton(config.document);
+    if (!button || button.disabled) return false;
+    if (button.getAttribute && button.getAttribute('aria-disabled') === 'true') return false;
+    return true;
+  }
+
+  function cancelRentalListingFromUserGesture(options) {
+    const config = options || {};
+    const propertyId = positiveInteger(config.propertyId);
+    const routeId = parseLeasePropertyId(config.location);
+    if (!propertyId || routeId !== propertyId) {
+      return { submitted: false, reason: 'Matching rental listing route is not ready' };
+    }
+    const button = findRentalCancelButton(config.document);
+    if (!button) return { submitted: false, reason: 'Remove from market control not recognized' };
+    if (button.disabled || button.getAttribute && button.getAttribute('aria-disabled') === 'true') {
+      return { submitted: false, reason: 'Remove from market control is disabled' };
+    }
+    button.click();
+    return { submitted: true, propertyId };
+  }
+
   return Object.freeze({
     parseLeasePropertyId,
     findLeaseForm,
@@ -1156,7 +1199,10 @@
     setNativeValue,
     verifyPreparedLeaseForm,
     prepareLeaseForm,
-    submitLeaseFromUserGesture
+    submitLeaseFromUserGesture,
+    findRentalCancelButton,
+    canCancelRentalListing,
+    cancelRentalListingFromUserGesture
   });
 }));
 
@@ -2020,6 +2066,76 @@
       return activeLoadPromise;
     }
 
+    function hydrate(snapshot) {
+      const source = snapshot && typeof snapshot === 'object' ? snapshot : {};
+      const properties = Array.isArray(source.properties) ? source.properties.slice() : [];
+      const markets = source.markets && typeof source.markets === 'object' && !Array.isArray(source.markets)
+        ? Object.assign({}, source.markets)
+        : {};
+      state = {
+        properties,
+        markets,
+        rows: computeRows(properties, markets),
+        loading: false,
+        error: null,
+        needsApiKey: false,
+        actionMessage: '',
+        scanProgress: null
+      };
+      render();
+      return state;
+    }
+
+    async function updateProperty(propertyId, options) {
+      const id = Number(propertyId);
+      if (!Number.isInteger(id) || id <= 0) throw new TypeError('A positive property ID is required');
+      if (apiClientFactory && !settings.apiKey) {
+        settingsOpen = true;
+        state = Object.assign({}, state, { needsApiKey: true, error: null });
+        render();
+        return state;
+      }
+      const apiClient = getApiClient();
+      state = Object.assign({}, state, { error: null, needsApiKey: false, actionMessage: `Updating property ${id}…` });
+      render();
+      try {
+        const currentUserId = typeof apiClient.fetchCurrentUserId === 'function'
+          ? await apiClient.fetchCurrentUserId()
+          : null;
+        const rawProperties = await apiClient.fetchOwnedProperties();
+        const freshProperties = propertyCore.normalizeProperties(rawProperties, currentUserId);
+        const fresh = freshProperties.find(property => Number(property.id) === id);
+        if (!fresh) throw new Error('Property is no longer present in the verified owned-property list');
+
+        let replaced = false;
+        const properties = (state.properties || []).map(property => {
+          if (Number(property.id) !== id) return property;
+          replaced = true;
+          return fresh;
+        });
+        if (!replaced) properties.push(fresh);
+
+        const scanned = await apiClient.scanMarkets([fresh], { force: Boolean(options && options.force) });
+        const markets = Object.assign({}, state.markets || {}, scanned || {});
+        state = Object.assign({}, state, {
+          properties,
+          markets,
+          rows: computeRows(properties, markets),
+          loading: false,
+          error: null,
+          needsApiKey: false,
+          actionMessage: `Property ${id} updated.`,
+          scanProgress: null
+        });
+        render();
+        return state;
+      } catch (error) {
+        state = Object.assign({}, state, { error, actionMessage: `Property ${id} update failed.` });
+        render();
+        throw error;
+      }
+    }
+
     function setTheme(theme) {
       persistSettings({ theme });
       render();
@@ -2061,6 +2177,8 @@
 
     return Object.freeze({
       load,
+      hydrate,
+      updateProperty,
       render,
       open,
       close: closePanel,
@@ -3049,6 +3167,544 @@
   }));
 }));
 
+/* ===== src/update-core-v034.js ===== */
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.R4G3UpdateCoreV034 = api;
+}(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+
+  const SETTINGS_KEY = 'r4g3_property_rental_manager.v034.updates';
+  const SNAPSHOT_KEY = 'r4g3_property_rental_manager.v034.snapshot';
+  const DEFAULT_SETTINGS = Object.freeze({ autoPageUpdate: false });
+
+  function normalizeSettings(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    return { autoPageUpdate: source.autoPageUpdate === true };
+  }
+
+  function loadSettings(storage) {
+    if (!storage || typeof storage.getItem !== 'function') return normalizeSettings({});
+    try {
+      const raw = storage.getItem(SETTINGS_KEY);
+      return normalizeSettings(raw ? JSON.parse(raw) : {});
+    } catch (error) {
+      return normalizeSettings({});
+    }
+  }
+
+  function saveSettings(storage, next) {
+    const normalized = normalizeSettings(Object.assign({}, loadSettings(storage), next || {}));
+    if (storage && typeof storage.setItem === 'function') {
+      storage.setItem(SETTINGS_KEY, JSON.stringify(normalized));
+    }
+    return normalized;
+  }
+
+  function timestamp(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+  }
+
+  function normalizeTimestampMap(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const result = {};
+    for (const [key, raw] of Object.entries(source)) {
+      const id = Number(key);
+      const time = timestamp(raw);
+      if (Number.isInteger(id) && id > 0 && time) result[String(id)] = time;
+    }
+    return result;
+  }
+
+  function normalizeSnapshot(value) {
+    if (!value || typeof value !== 'object' || !Array.isArray(value.properties)) return null;
+    const markets = value.markets && typeof value.markets === 'object' && !Array.isArray(value.markets)
+      ? value.markets
+      : {};
+    return {
+      properties: value.properties,
+      markets,
+      updatedAt: timestamp(value.updatedAt),
+      propertyUpdatedAt: normalizeTimestampMap(value.propertyUpdatedAt)
+    };
+  }
+
+  function loadSnapshot(storage) {
+    if (!storage || typeof storage.getItem !== 'function') return null;
+    try {
+      const raw = storage.getItem(SNAPSHOT_KEY);
+      return raw ? normalizeSnapshot(JSON.parse(raw)) : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function saveSnapshot(storage, next) {
+    const normalized = normalizeSnapshot(next);
+    if (!normalized) return null;
+    if (storage && typeof storage.setItem === 'function') {
+      try {
+        storage.setItem(SNAPSHOT_KEY, JSON.stringify(normalized));
+      } catch (error) {
+        return normalized;
+      }
+    }
+    return normalized;
+  }
+
+  return Object.freeze({
+    SETTINGS_KEY,
+    SNAPSHOT_KEY,
+    DEFAULT_SETTINGS,
+    normalizeSettings,
+    loadSettings,
+    saveSettings,
+    normalizeSnapshot,
+    loadSnapshot,
+    saveSnapshot
+  });
+}));
+
+/* ===== src/app-v034.js ===== */
+(function (root, factory) {
+  const baseApp = typeof module === 'object' && module.exports ? require('./app-v033') : root.R4G3PropertyRentalApp;
+  const updateCore = typeof module === 'object' && module.exports ? require('./update-core-v034') : root.R4G3UpdateCoreV034;
+  const api = factory(baseApp, updateCore);
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.R4G3PropertyRentalApp = api;
+}(typeof globalThis !== 'undefined' ? globalThis : this, function (baseApp, updateCore) {
+  'use strict';
+
+  if (!baseApp || !updateCore) throw new Error('v0.3.4 app dependencies are unavailable');
+
+  function createController(options) {
+    const config = options || {};
+    const windowLike = config.window;
+    const documentLike = config.document;
+    const storage = config.storage || windowLike && windowLike.localStorage;
+    const prepareCancelProperty = typeof config.prepareCancelProperty === 'function'
+      ? config.prepareCancelProperty
+      : () => ({ prepared: false, reason: 'Cancellation preparation unavailable' });
+    const canCancelProperty = typeof config.canCancelProperty === 'function'
+      ? config.canCancelProperty
+      : () => false;
+    const cancelProperty = typeof config.cancelProperty === 'function'
+      ? config.cancelProperty
+      : () => ({ submitted: false, reason: 'Cancellation unavailable' });
+
+    if (!windowLike || !documentLike) throw new TypeError('window and document are required');
+
+    const baseController = baseApp.createController(config);
+    let updateSettings = updateCore.loadSettings(storage);
+    const savedSnapshot = updateCore.loadSnapshot(storage);
+    let updatedAt = savedSnapshot && Number(savedSnapshot.updatedAt) || 0;
+    const propertyUpdatedAt = Object.assign({}, savedSnapshot && savedSnapshot.propertyUpdatedAt || {});
+    const updatingProperties = new Set();
+    const cancellationSent = new Set();
+    let updatingAll = false;
+    let pendingCancelId = null;
+    let destroyed = false;
+
+    if (savedSnapshot && typeof baseController.hydrate === 'function') {
+      baseController.hydrate({
+        properties: savedSnapshot.properties,
+        markets: savedSnapshot.markets
+      });
+      baseController.render();
+    }
+
+    function now() {
+      return Date.now();
+    }
+
+    function saveCurrentSnapshot() {
+      const state = baseController.getState();
+      return updateCore.saveSnapshot(storage, {
+        properties: state.properties || [],
+        markets: state.markets || {},
+        updatedAt,
+        propertyUpdatedAt
+      });
+    }
+
+    function formattedUpdatedAt(propertyId) {
+      const value = Number(propertyUpdatedAt[String(propertyId)] || propertyUpdatedAt[propertyId] || 0);
+      if (!value) return 'Never';
+      try {
+        return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      } catch (error) {
+        return new Date(value).toLocaleTimeString();
+      }
+    }
+
+    function makeButton(text, action) {
+      const button = documentLike.createElement('button');
+      button.type = 'button';
+      button.textContent = text;
+      button.dataset.action = action;
+      button.dataset.noDrag = 'true';
+      button.style.cursor = 'pointer';
+      button.style.padding = '7px 10px';
+      button.style.borderRadius = '7px';
+      button.style.border = '1px solid currentColor';
+      button.style.background = 'transparent';
+      button.style.color = 'inherit';
+      return button;
+    }
+
+    function renderController() {
+      const result = baseController.render();
+      enhanceMainPanel();
+      enhanceSettingsWindow();
+      return result;
+    }
+
+    async function updateProperty(propertyId) {
+      const id = Number(propertyId);
+      if (!Number.isInteger(id) || id <= 0 || updatingProperties.has(id)) return false;
+      if (typeof baseController.updateProperty !== 'function') throw new Error('Per-property update support is unavailable');
+      updatingProperties.add(id);
+      enhanceMainPanel();
+      try {
+        const result = await baseController.updateProperty(id, { force: true });
+        const stamp = now();
+        propertyUpdatedAt[String(id)] = stamp;
+        updatedAt = Math.max(updatedAt, stamp);
+        cancellationSent.delete(id);
+        if (pendingCancelId === id) pendingCancelId = null;
+        saveCurrentSnapshot();
+        return result;
+      } finally {
+        updatingProperties.delete(id);
+        renderController();
+      }
+    }
+
+    async function updateAll() {
+      if (updatingAll) return baseController.getState();
+      updatingAll = true;
+      enhanceMainPanel();
+      try {
+        const state = await baseController.load({ force: true });
+        if (!state.needsApiKey && !state.error) {
+          const stamp = now();
+          updatedAt = stamp;
+          for (const property of state.properties || []) propertyUpdatedAt[String(property.id)] = stamp;
+          cancellationSent.clear();
+          if (pendingCancelId != null) {
+            const pending = (state.properties || []).find(property => Number(property.id) === Number(pendingCancelId));
+            if (!pending || String(pending.status || '').toLowerCase() !== 'for_rent') pendingCancelId = null;
+          }
+          saveCurrentSnapshot();
+        }
+        return state;
+      } finally {
+        updatingAll = false;
+        renderController();
+      }
+    }
+
+    function setAutoPageUpdate(value) {
+      updateSettings = updateCore.saveSettings(storage, { autoPageUpdate: value === true });
+      enhanceSettingsWindow();
+      return updateSettings.autoPageUpdate;
+    }
+
+    function cancelClick(propertyId) {
+      const id = Number(propertyId);
+      if (!Number.isInteger(id) || id <= 0) return false;
+      if (pendingCancelId !== id) {
+        pendingCancelId = id;
+        cancellationSent.delete(id);
+        prepareCancelProperty(id);
+        renderController();
+        return true;
+      }
+
+      if (!canCancelProperty(id)) {
+        enhanceMainPanel();
+        return false;
+      }
+
+      const result = cancelProperty(id);
+      if (result && result.submitted) {
+        pendingCancelId = null;
+        cancellationSent.add(id);
+        renderController();
+        return true;
+      }
+      enhanceMainPanel();
+      return false;
+    }
+
+    function ensureCardControls(row, entry) {
+      const property = entry && entry.property || {};
+      const id = Number(property.id);
+      if (!id) return;
+      let controls = row.querySelector('[data-role="v034-card-controls"]');
+      if (!controls) {
+        controls = documentLike.createElement('div');
+        controls.dataset.role = 'v034-card-controls';
+        controls.style.gridColumn = '1 / -1';
+        controls.style.display = 'flex';
+        controls.style.flexWrap = 'wrap';
+        controls.style.alignItems = 'center';
+        controls.style.gap = '8px';
+        controls.style.marginTop = '4px';
+        row.appendChild(controls);
+      }
+
+      let updated = controls.querySelector('[data-role="v034-last-updated"]');
+      if (!updated) {
+        updated = documentLike.createElement('small');
+        updated.dataset.role = 'v034-last-updated';
+        updated.style.opacity = '0.72';
+        updated.style.marginRight = 'auto';
+        controls.appendChild(updated);
+      }
+      const updatedText = `Last updated: ${formattedUpdatedAt(id)}`;
+      if (updated.textContent !== updatedText) updated.textContent = updatedText;
+
+      let updateButton = controls.querySelector('[data-action="v034-update-property"]');
+      if (!updateButton) {
+        updateButton = makeButton('↻ UPDATE', 'v034-update-property');
+        updateButton.dataset.propertyId = String(id);
+        updateButton.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          updateProperty(id).catch(() => {});
+        });
+        controls.appendChild(updateButton);
+      }
+      const isUpdating = updatingProperties.has(id);
+      const updateText = isUpdating ? 'UPDATING…' : '↻ UPDATE';
+      if (updateButton.textContent !== updateText) updateButton.textContent = updateText;
+      updateButton.disabled = isUpdating;
+
+      const status = String(property.status || '').toLowerCase();
+      let cancelButton = controls.querySelector('[data-action="v034-cancel-listing"]');
+      let note = row.querySelector('[data-role="v034-cancel-note"]');
+
+      if (status === 'for_rent' && !cancellationSent.has(id)) {
+        if (!cancelButton) {
+          cancelButton = makeButton('CANCEL LISTING', 'v034-cancel-listing');
+          cancelButton.dataset.propertyId = String(id);
+          cancelButton.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            cancelClick(id);
+          });
+          controls.appendChild(cancelButton);
+        }
+        const pending = pendingCancelId === id;
+        const ready = pending && canCancelProperty(id);
+        const label = pending ? (ready ? 'CONFIRM CANCEL LISTING' : 'WAITING FOR TORN…') : 'CANCEL LISTING';
+        if (cancelButton.textContent !== label) cancelButton.textContent = label;
+        cancelButton.disabled = pending && !ready;
+        if (note && note.parentNode) note.remove();
+      } else {
+        if (cancelButton && cancelButton.parentNode) cancelButton.remove();
+        if (cancellationSent.has(id)) {
+          if (!note) {
+            note = documentLike.createElement('div');
+            note.dataset.role = 'v034-cancel-note';
+            note.style.gridColumn = '1 / -1';
+            note.style.fontWeight = '700';
+            note.style.padding = '8px 10px';
+            note.style.border = '1px solid currentColor';
+            note.style.borderRadius = '8px';
+            row.appendChild(note);
+          }
+          const text = 'CANCELLATION SENT • Press UPDATE PROPERTY to verify Torn removed the listing.';
+          if (note.textContent !== text) note.textContent = text;
+        } else if (status === 'rented') {
+          if (!note) {
+            note = documentLike.createElement('div');
+            note.dataset.role = 'v034-cancel-note';
+            note.style.gridColumn = '1 / -1';
+            note.style.opacity = '0.78';
+            note.style.paddingTop = '4px';
+            row.appendChild(note);
+          }
+          const text = 'Active lease cannot be cancelled.';
+          if (note.textContent !== text) note.textContent = text;
+        } else if (note && note.parentNode) {
+          note.remove();
+        }
+      }
+    }
+
+    function enhanceHeader(panel) {
+      const header = panel && panel.querySelector('.r4g3-prm-header');
+      if (!header) return;
+      let updateAllButton = header.querySelector('[data-action="v034-update-all"]');
+      if (!updateAllButton) {
+        const legacy = header.querySelector('[data-action="refresh"]');
+        if (legacy) {
+          legacy.dataset.action = 'v034-update-all';
+          legacy.dataset.noDrag = 'true';
+          updateAllButton = legacy;
+        }
+      }
+      if (!updateAllButton) return;
+      const label = updatingAll ? 'UPDATING…' : 'UPDATE ALL';
+      if (updateAllButton.textContent !== label) updateAllButton.textContent = label;
+      updateAllButton.disabled = updatingAll;
+      updateAllButton.title = 'Manually refresh all owned properties and their rental markets';
+      if (updateAllButton.dataset.v034Bound !== '1') {
+        updateAllButton.dataset.v034Bound = '1';
+        updateAllButton.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          updateAll().catch(() => {});
+        });
+      }
+    }
+
+    function enhanceEmptyState(panel) {
+      const state = baseController.getState();
+      if ((state.rows || []).length || savedSnapshot) return;
+      let note = panel.querySelector('[data-role="v034-empty-note"]');
+      if (!note) {
+        note = documentLike.createElement('div');
+        note.dataset.role = 'v034-empty-note';
+        note.style.padding = '18px';
+        note.style.textAlign = 'center';
+        note.style.opacity = '0.8';
+        note.textContent = 'No saved property data. Press UPDATE ALL to load your properties.';
+        const handle = panel.querySelector('[data-role="resize-handle"]');
+        if (handle) panel.insertBefore(note, handle);
+        else panel.appendChild(note);
+      }
+    }
+
+    function enhanceMainPanel() {
+      if (destroyed) return null;
+      const panel = documentLike.getElementById('r4g3-prm-panel');
+      if (!panel) return null;
+      enhanceHeader(panel);
+      const entries = new Map((baseController.getState().rows || []).map(entry => [Number(entry.property && entry.property.id), entry]));
+      for (const row of panel.querySelectorAll('[data-property-id]')) {
+        const entry = entries.get(Number(row.getAttribute('data-property-id')));
+        if (entry) ensureCardControls(row, entry);
+      }
+      enhanceEmptyState(panel);
+      return panel;
+    }
+
+    function settingsSection(title) {
+      const section = documentLike.createElement('section');
+      section.dataset.role = 'v034-update-settings';
+      section.style.padding = '12px';
+      section.style.margin = '0 10px 10px';
+      section.style.border = '1px solid rgba(128,128,128,0.35)';
+      section.style.borderRadius = '9px';
+      section.style.display = 'grid';
+      section.style.gap = '10px';
+      const heading = documentLike.createElement('strong');
+      heading.textContent = title;
+      section.appendChild(heading);
+      return section;
+    }
+
+    function enhanceSettingsWindow() {
+      const node = documentLike.getElementById('r4g3-prm-settings-window');
+      if (!node) return null;
+      const apiSection = node.querySelector('[data-role="api-settings"]');
+      let updates = node.querySelector('[data-role="v034-update-settings"]');
+      if (!updates) {
+        updates = settingsSection('UPDATES');
+        const label = documentLike.createElement('label');
+        label.style.display = 'flex';
+        label.style.alignItems = 'center';
+        label.style.gap = '8px';
+        const checkbox = documentLike.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.dataset.role = 'auto-page-update-input';
+        checkbox.checked = updateSettings.autoPageUpdate;
+        checkbox.addEventListener('change', () => setAutoPageUpdate(checkbox.checked));
+        const text = documentLike.createElement('span');
+        text.textContent = 'Automatic page update';
+        label.append(checkbox, text);
+        const help = documentLike.createElement('small');
+        help.style.opacity = '0.72';
+        help.textContent = 'Off by default. When enabled, update all properties once when the Torn Properties page loads. No background polling.';
+        updates.append(label, help);
+        if (apiSection && apiSection.parentNode) apiSection.parentNode.insertBefore(updates, apiSection);
+        else node.appendChild(updates);
+      } else {
+        const checkbox = updates.querySelector('[data-role="auto-page-update-input"]');
+        if (checkbox) checkbox.checked = updateSettings.autoPageUpdate;
+      }
+
+      if (apiSection) {
+        let safety = apiSection.querySelector('[data-role="v034-api-safety"]');
+        if (!safety) {
+          safety = documentLike.createElement('div');
+          safety.dataset.role = 'v034-api-safety';
+          safety.style.paddingTop = '8px';
+          safety.style.borderTop = '1px solid rgba(128,128,128,0.25)';
+          safety.innerHTML = '<strong>API Safety</strong><br><small>Request limit: 80 / minute • Minimum spacing: 750 ms • Rate-limit cooldown: 60 seconds</small>';
+          apiSection.appendChild(safety);
+        }
+        const force = apiSection.querySelector('[data-action="v033-force-refresh"]');
+        if (force) {
+          force.dataset.action = 'v034-update-all-now';
+          force.textContent = 'UPDATE ALL NOW';
+          if (force.dataset.v034Bound !== '1') {
+            force.dataset.v034Bound = '1';
+            force.addEventListener('click', event => {
+              event.preventDefault();
+              event.stopPropagation();
+              updateAll().catch(() => {});
+            });
+          }
+        }
+      }
+      return node;
+    }
+
+    const controller = Object.assign({}, baseController, {
+      load: updateAll,
+      updateAll,
+      updateProperty,
+      render: renderController,
+      open() {
+        const result = baseController.open();
+        enhanceMainPanel();
+        return result;
+      },
+      openSettings() {
+        const result = baseController.openSettings();
+        enhanceSettingsWindow();
+        return result;
+      },
+      getUpdateSettings: () => Object.assign({}, updateSettings),
+      setAutoPageUpdate,
+      destroy() {
+        destroyed = true;
+        return baseController.destroy();
+      }
+    });
+
+    enhanceMainPanel();
+    enhanceSettingsWindow();
+    return Object.freeze(controller);
+  }
+
+  return Object.freeze(Object.assign({}, baseApp, {
+    UPDATE_SETTINGS_KEY: updateCore.SETTINGS_KEY,
+    SNAPSHOT_KEY: updateCore.SNAPSHOT_KEY,
+    loadUpdateSettings: updateCore.loadSettings,
+    saveUpdateSettings: updateCore.saveSettings,
+    loadSnapshot: updateCore.loadSnapshot,
+    saveSnapshot: updateCore.saveSnapshot,
+    createController
+  }));
+}));
+
 /* ===== src/bootstrap.js ===== */
 (function (root, factory) {
   const api = factory(root);
@@ -3401,6 +4057,14 @@
     return decorated;
   }
 
+  async function runInitialUpdate(controller) {
+    if (!controller || typeof controller.getUpdateSettings !== 'function' || typeof controller.updateAll !== 'function') return false;
+    const settings = controller.getUpdateSettings();
+    if (!settings || settings.autoPageUpdate !== true) return false;
+    await controller.updateAll({ source: 'automatic' });
+    return true;
+  }
+
   function start(windowLike) {
     const win = windowLike || root;
     if (!win || !win.document || !win.location) return null;
@@ -3449,6 +4113,26 @@
       },
       listProperty(propertyId) {
         return leaseLister.list(propertyId);
+      },
+      prepareCancelProperty(propertyId) {
+        const id = Number(propertyId);
+        if (!Number.isInteger(id) || id <= 0) return { prepared: false, reason: 'Invalid property ID' };
+        win.location.href = R4G3PropertyCore.leaseUrl(id);
+        return { prepared: true, propertyId: id };
+      },
+      canCancelProperty(propertyId) {
+        return R4G3FormCore.canCancelRentalListing({
+          document: win.document,
+          location: win.location,
+          propertyId
+        });
+      },
+      cancelProperty(propertyId) {
+        return R4G3FormCore.cancelRentalListingFromUserGesture({
+          document: win.document,
+          location: win.location,
+          propertyId
+        });
       }
     });
 
@@ -3484,7 +4168,7 @@
     win.addEventListener('hashchange', onHashChange);
     leasePreparer.prepareWithWait();
     launcher.start();
-    controller.load().then(() => {
+    runInitialUpdate(controller).then(() => {
       refreshRentalActions();
     }).catch(() => {
       // The controller renders a sanitized error state. Never log the API key-bearing error.
@@ -3513,6 +4197,7 @@
     createLeasePreparer,
     createLeaseLister,
     decorateRentalActions,
+    runInitialUpdate,
     start
   });
 }));

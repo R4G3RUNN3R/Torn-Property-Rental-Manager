@@ -349,6 +349,14 @@
     return decorated;
   }
 
+  async function runInitialUpdate(controller) {
+    if (!controller || typeof controller.getUpdateSettings !== 'function' || typeof controller.updateAll !== 'function') return false;
+    const settings = controller.getUpdateSettings();
+    if (!settings || settings.autoPageUpdate !== true) return false;
+    await controller.updateAll({ source: 'automatic' });
+    return true;
+  }
+
   function start(windowLike) {
     const win = windowLike || root;
     if (!win || !win.document || !win.location) return null;
@@ -397,6 +405,26 @@
       },
       listProperty(propertyId) {
         return leaseLister.list(propertyId);
+      },
+      prepareCancelProperty(propertyId) {
+        const id = Number(propertyId);
+        if (!Number.isInteger(id) || id <= 0) return { prepared: false, reason: 'Invalid property ID' };
+        win.location.href = R4G3PropertyCore.leaseUrl(id);
+        return { prepared: true, propertyId: id };
+      },
+      canCancelProperty(propertyId) {
+        return R4G3FormCore.canCancelRentalListing({
+          document: win.document,
+          location: win.location,
+          propertyId
+        });
+      },
+      cancelProperty(propertyId) {
+        return R4G3FormCore.cancelRentalListingFromUserGesture({
+          document: win.document,
+          location: win.location,
+          propertyId
+        });
       }
     });
 
@@ -432,7 +460,7 @@
     win.addEventListener('hashchange', onHashChange);
     leasePreparer.prepareWithWait();
     launcher.start();
-    controller.load().then(() => {
+    runInitialUpdate(controller).then(() => {
       refreshRentalActions();
     }).catch(() => {
       // The controller renders a sanitized error state. Never log the API key-bearing error.
@@ -461,6 +489,7 @@
     createLeasePreparer,
     createLeaseLister,
     decorateRentalActions,
+    runInitialUpdate,
     start
   });
 }));

@@ -12,10 +12,10 @@ function release() {
   return fs.readFileSync(releasePath, 'utf8');
 }
 
-test('release userscript has narrow Torn properties metadata and v0.3.3 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.3.4 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.3\.3/);
+  assert.match(source, /@version\s+0\.3\.4/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
@@ -69,7 +69,7 @@ test('release keeps PREPARE RENTAL draft armed until explicit verified LIST PROP
   assert.match(source, /MutationObserver/);
 });
 
-test('release contains current exact-match 100-day pricing and v0.3.3 strategy controls', () => {
+test('release contains current exact-match 100-day pricing and strategy controls', () => {
   const source = release();
   assert.match(source, /body\.rentals\.listings/);
   assert.match(source, /function exactModificationMatch/);
@@ -84,6 +84,39 @@ test('release contains current exact-match 100-day pricing and v0.3.3 strategy c
   assert.match(source, /LISTED FOR RENT/);
 });
 
+test('release defaults to manual updates with optional one-shot automatic page update', () => {
+  const source = release();
+  assert.match(source, /autoPageUpdate:\s*false/);
+  assert.match(source, /Automatic page update/);
+  assert.match(source, /function runInitialUpdate/);
+  assert.match(source, /runInitialUpdate\(controller\)/);
+  assert.doesNotMatch(source, /controller\.load\(\)\.then\(\(\) => \{\s*refreshRentalActions\(\)/);
+  assert.match(source, /v034-update-property/);
+  assert.match(source, /UPDATE ALL/);
+  assert.match(source, /Last updated:/);
+});
+
+test('release cancellation is explicit, native and fail-closed', () => {
+  const source = release();
+  assert.match(source, /function findRentalCancelButton/);
+  assert.match(source, /function canCancelRentalListing/);
+  assert.match(source, /function cancelRentalListingFromUserGesture/);
+  assert.match(source, /CANCEL LISTING/);
+  assert.match(source, /CONFIRM CANCEL LISTING/);
+  assert.match(source, /CANCELLATION SENT/);
+  assert.match(source, /Active lease cannot be cancelled/);
+  assert.match(source, /button\.click\(\)/);
+});
+
+test('release enforces shared 80 per minute and 750ms Torn API pacing', () => {
+  const source = release();
+  assert.match(source, /minGapMs:\s*750/);
+  assert.match(source, /maxPerMinute:\s*80/);
+  assert.match(source, /Request limit: 80 \/ minute/);
+  assert.match(source, /Minimum spacing: 750 ms/);
+  assert.match(source, /RATE_LIMIT_COOLDOWN_MS\s*=\s*60\s*\*\s*1000/);
+});
+
 test('build script declares every source module in deterministic order', () => {
   const buildPath = path.join(root, 'scripts', 'build-userscript.js');
   const source = fs.readFileSync(buildPath, 'utf8');
@@ -96,6 +129,8 @@ test('build script declares every source module in deterministic order', () => {
     'src/app.js',
     'src/ui-core-v033.js',
     'src/app-v033.js',
+    'src/update-core-v034.js',
+    'src/app-v034.js',
     'src/bootstrap.js'
   ];
   let last = -1;

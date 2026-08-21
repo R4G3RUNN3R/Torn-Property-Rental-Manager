@@ -1,9 +1,9 @@
 name: v034-package-once
 
 on:
-  push:
+  pull_request:
     branches:
-      - feature/v0.3.4-manual-updates-cancel
+      - main
 
 permissions:
   contents: write

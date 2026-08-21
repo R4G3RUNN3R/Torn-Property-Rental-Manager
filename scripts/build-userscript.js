@@ -16,6 +16,8 @@ const sourceFiles = [
   'src/app.js',
   'src/ui-core-v033.js',
   'src/app-v033.js',
+  'src/update-core-v034.js',
+  'src/app-v034.js',
   'src/bootstrap.js'
 ];
 
@@ -24,7 +26,7 @@ function metadata() {
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
 // @version      ${packageJson.version}
-// @description  Price owned Torn rentals from exact market matches with configurable market strategy and an explicit two-click listing workflow.
+// @description  Manage Torn rentals with manual property updates, configurable exact-match pricing, safe cancellation/relisting, and explicit native actions.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
 // @grant        GM_xmlhttpRequest

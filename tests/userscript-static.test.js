@@ -12,10 +12,10 @@ function release() {
   return fs.readFileSync(releasePath, 'utf8');
 }
 
-test('release userscript has narrow Torn properties metadata and v0.3.4 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.3.5 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.3\.4/);
+  assert.match(source, /@version\s+0\.3\.5/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
@@ -88,6 +88,9 @@ test('release defaults to manual updates with optional one-shot automatic page u
   const source = release();
   assert.match(source, /autoPageUpdate:\s*false/);
   assert.match(source, /Automatic page update/);
+  assert.match(source, /v035-update-mode-manual/);
+  assert.match(source, /v035-update-mode-automatic/);
+  assert.match(source, /v035-update-progress/);
   assert.match(source, /function runInitialUpdate/);
   assert.match(source, /runInitialUpdate\(controller\)/);
   assert.doesNotMatch(source, /controller\.load\(\)\.then\(\(\) => \{\s*refreshRentalActions\(\)/);
@@ -103,6 +106,8 @@ test('release cancellation is explicit, native and fail-closed', () => {
   assert.match(source, /function cancelRentalListingFromUserGesture/);
   assert.match(source, /CANCEL LISTING/);
   assert.match(source, /CONFIRM CANCEL LISTING/);
+  assert.match(source, /FINAL CONFIRM CANCEL/);
+  assert.match(source, /findRentalCancelConfirmationButton/);
   assert.match(source, /CANCELLATION SENT/);
   assert.match(source, /Active lease cannot be cancelled/);
   assert.match(source, /button\.click\(\)/);

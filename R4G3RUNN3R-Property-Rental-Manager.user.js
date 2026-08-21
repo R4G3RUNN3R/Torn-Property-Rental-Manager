@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
-// @version      0.3.4
-// @description  Manage Torn rentals with manual property updates, configurable exact-match pricing, safe cancellation/relisting, and explicit native actions.
+// @version      0.3.5
+// @description  Manage Torn rentals with isolated property updates, visible progress, explicit update modes, safe cancellation/relisting, and explicit native actions.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
 // @grant        GM_xmlhttpRequest
@@ -1149,16 +1149,27 @@
     };
   }
 
+  function compactText(node) {
+    return String(
+      node && (node.textContent || node.value) ||
+      node && node.getAttribute && (node.getAttribute('aria-label') || node.getAttribute('title')) || ''
+    ).replace(/\s+/g, ' ').trim();
+  }
+
+  function isInsideManager(node) {
+    return Boolean(node && node.closest && node.closest('#r4g3-prm-panel, #r4g3-prm-settings-window'));
+  }
+
+  function isDialogContainer(node) {
+    return Boolean(node && node.closest && node.closest('dialog, [role="dialog"], [aria-modal="true"]'));
+  }
+
   function findRentalCancelButton(documentLike) {
     if (!documentLike || typeof documentLike.querySelectorAll !== 'function') return null;
-    const scope = documentLike.querySelector('#market') || documentLike;
-    const candidates = [...scope.querySelectorAll('button, a, input[type="button"], input[type="submit"]')];
+    const candidates = [...documentLike.querySelectorAll('button, a, input[type="button"], input[type="submit"]')];
     return candidates.find(candidate => {
-      if (candidate.closest && candidate.closest('#r4g3-prm-panel, #r4g3-prm-settings-window')) return false;
-      const text = String(
-        candidate.textContent || candidate.value ||
-        candidate.getAttribute && (candidate.getAttribute('aria-label') || candidate.getAttribute('title')) || ''
-      ).replace(/\s+/g, ' ').trim();
+      if (isInsideManager(candidate) || isDialogContainer(candidate)) return false;
+      const text = compactText(candidate);
       return /remove\s+(?:this\s+)?(?:property\s+)?from\s+(?:the\s+)?market/i.test(text) ||
         /(?:remove|cancel|withdraw)\s+(?:rental\s+)?listing/i.test(text) ||
         /^delist$/i.test(text);
@@ -1192,6 +1203,66 @@
     return { submitted: true, propertyId };
   }
 
+  function cancellationDialogText(node) {
+    return compactText(node).toLowerCase();
+  }
+
+  function isRentalCancellationDialog(node) {
+    if (!node || isInsideManager(node)) return false;
+    const text = cancellationDialogText(node);
+    const removeMarket = /remove.{0,80}(?:property|rental|listing).{0,80}(?:market)/i.test(text) ||
+      /(?:property|rental|listing).{0,80}remove.{0,80}(?:market)/i.test(text) ||
+      /remove.{0,80}from.{0,30}market/i.test(text);
+    const confirmation = /are you sure|confirm|confirmation|yes|remove/i.test(text);
+    return removeMarket && confirmation;
+  }
+
+  function findRentalCancelConfirmationButton(documentLike) {
+    if (!documentLike || typeof documentLike.querySelectorAll !== 'function') return null;
+    const explicitDialogs = [...documentLike.querySelectorAll('dialog, [role="dialog"], [aria-modal="true"]')];
+    const dialogs = explicitDialogs.filter(isRentalCancellationDialog);
+    for (const dialog of dialogs) {
+      const candidates = [...dialog.querySelectorAll('button, a, input[type="button"], input[type="submit"]')];
+      const button = candidates.find(candidate => {
+        if (isInsideManager(candidate)) return false;
+        const text = compactText(candidate);
+        if (/^(?:no|cancel|back|close)$/i.test(text)) return false;
+        return /^(?:yes|confirm|ok|okay)$/i.test(text) ||
+          /(?:confirm|remove).{0,40}(?:property|listing|market)/i.test(text) ||
+          /remove\s+(?:this\s+)?(?:property\s+)?from\s+(?:the\s+)?market/i.test(text);
+      });
+      if (button) return button;
+    }
+    return null;
+  }
+
+  function canConfirmRentalCancellation(options) {
+    const config = options || {};
+    const propertyId = positiveInteger(config.propertyId);
+    const routeId = parseLeasePropertyId(config.location);
+    if (!propertyId || routeId !== propertyId) return false;
+    const button = findRentalCancelConfirmationButton(config.document);
+    if (!button || button.disabled) return false;
+    if (button.getAttribute && button.getAttribute('aria-disabled') === 'true') return false;
+    return true;
+  }
+
+  function confirmRentalCancellationFromUserGesture(options) {
+    const config = options || {};
+    const propertyId = positiveInteger(config.propertyId);
+    const routeId = parseLeasePropertyId(config.location);
+    if (!propertyId || routeId !== propertyId) {
+      return { submitted: false, reason: 'Matching rental listing route is not ready' };
+    }
+    const button = findRentalCancelConfirmationButton(config.document);
+    if (!button) return { submitted: false, reason: 'Rental cancellation confirmation not recognized' };
+    if (button.disabled || button.getAttribute && button.getAttribute('aria-disabled') === 'true') {
+      return { submitted: false, reason: 'Rental cancellation confirmation is disabled' };
+    }
+    button.click();
+    return { submitted: true, propertyId };
+  }
+
   return Object.freeze({
     parseLeasePropertyId,
     findLeaseForm,
@@ -1202,7 +1273,10 @@
     submitLeaseFromUserGesture,
     findRentalCancelButton,
     canCancelRentalListing,
-    cancelRentalListingFromUserGesture
+    cancelRentalListingFromUserGesture,
+    findRentalCancelConfirmationButton,
+    canConfirmRentalCancellation,
+    confirmRentalCancellationFromUserGesture
   });
 }));
 
@@ -1339,6 +1413,7 @@
     let state = {
       properties: [],
       markets: {},
+      propertyMarkets: {},
       rows: [],
       loading: false,
       error: null,
@@ -1379,9 +1454,11 @@
       return fixedApiClient;
     }
 
-    function computeRows(properties, markets) {
+    function computeRows(properties, markets, propertyMarkets) {
+      const perProperty = propertyMarkets && typeof propertyMarkets === 'object' ? propertyMarkets : {};
       return properties.map(property => {
-        const market = markets && markets[property.propertyTypeId];
+        const propertyMarket = perProperty[property.id] || perProperty[String(property.id)];
+        const market = propertyMarket || markets && markets[property.propertyTypeId];
         const quote = marketCore.rentalQuote(
           property,
           market && Array.isArray(market.rentals) ? market.rentals : [],
@@ -1740,7 +1817,7 @@
         const markets = Object.assign({}, state.markets, { [id]: market });
         state = Object.assign({}, state, {
           markets,
-          rows: computeRows(state.properties, markets),
+          rows: computeRows(state.properties, markets, state.propertyMarkets),
           actionMessage: `Market ${id} refreshed.`
         });
         render();
@@ -1749,7 +1826,7 @@
         const markets = Object.assign({}, state.markets, {
           [id]: { rentals: [], error: String(error && error.message || error) }
         });
-        state = Object.assign({}, state, { markets, rows: computeRows(state.properties, markets), actionMessage: `Market ${id} retry failed.` });
+        state = Object.assign({}, state, { markets, rows: computeRows(state.properties, markets, state.propertyMarkets), actionMessage: `Market ${id} retry failed.` });
         render();
         return false;
       }
@@ -1817,7 +1894,7 @@
           const patch = { undercutPercent: fields.undercutPercent };
           if (fields.apiKey) patch.apiKey = fields.apiKey;
           persistSettings(patch);
-          state.rows = computeRows(state.properties, state.markets);
+          state.rows = computeRows(state.properties, state.markets, state.propertyMarkets);
           render();
           return;
         }
@@ -2006,6 +2083,7 @@
         state = {
           properties: [],
           markets: {},
+          propertyMarkets: {},
           rows: [],
           loading: false,
           error: null,
@@ -2030,7 +2108,8 @@
         state = Object.assign({}, state, {
           properties,
           markets: {},
-          rows: computeRows(properties, {}),
+          propertyMarkets: {},
+          rows: computeRows(properties, {}, {}),
           scanProgress: { done: 0, total: typeIds.length }
         });
         render();
@@ -2041,14 +2120,16 @@
             const nextMarkets = Object.assign({}, state.markets, { [entry.id]: entry.market });
             state = Object.assign({}, state, {
               markets: nextMarkets,
-              rows: computeRows(properties, nextMarkets),
+              propertyMarkets: {},
+              rows: computeRows(properties, nextMarkets, {}),
               scanProgress: { done: entry.done, total: entry.total }
             });
             render();
           }
         });
-        const rows = computeRows(properties, markets);
-        state = { properties, markets, rows, loading: false, error: null, needsApiKey: false, actionMessage: '', scanProgress: null };
+        const propertyMarkets = {};
+        const rows = computeRows(properties, markets, propertyMarkets);
+        state = { properties, markets, propertyMarkets, rows, loading: false, error: null, needsApiKey: false, actionMessage: '', scanProgress: null };
         render();
         return state;
       } catch (error) {
@@ -2072,10 +2153,14 @@
       const markets = source.markets && typeof source.markets === 'object' && !Array.isArray(source.markets)
         ? Object.assign({}, source.markets)
         : {};
+      const propertyMarkets = source.propertyMarkets && typeof source.propertyMarkets === 'object' && !Array.isArray(source.propertyMarkets)
+        ? Object.assign({}, source.propertyMarkets)
+        : {};
       state = {
         properties,
         markets,
-        rows: computeRows(properties, markets),
+        propertyMarkets,
+        rows: computeRows(properties, markets, propertyMarkets),
         loading: false,
         error: null,
         needsApiKey: false,
@@ -2088,20 +2173,29 @@
 
     async function updateProperty(propertyId, options) {
       const id = Number(propertyId);
+      const updateOptions = options || {};
+      const silent = updateOptions.silent === true;
+      const onProgress = typeof updateOptions.onProgress === 'function' ? updateOptions.onProgress : null;
+      const progress = value => {
+        if (!onProgress) return;
+        try { onProgress(Object.assign({ propertyId: id }, value || {})); } catch (error) { /* UI progress must never break an update. */ }
+      };
       if (!Number.isInteger(id) || id <= 0) throw new TypeError('A positive property ID is required');
       if (apiClientFactory && !settings.apiKey) {
         settingsOpen = true;
         state = Object.assign({}, state, { needsApiKey: true, error: null });
-        render();
+        if (!silent) render();
         return state;
       }
       const apiClient = getApiClient();
       state = Object.assign({}, state, { error: null, needsApiKey: false, actionMessage: `Updating property ${id}…` });
-      render();
+      progress({ phase: 'property', percent: 5, label: 'Checking property status…' });
+      if (!silent) render();
       try {
         const currentUserId = typeof apiClient.fetchCurrentUserId === 'function'
           ? await apiClient.fetchCurrentUserId()
           : null;
+        progress({ phase: 'property', percent: 20, label: 'Loading current property state…' });
         const rawProperties = await apiClient.fetchOwnedProperties();
         const freshProperties = propertyCore.normalizeProperties(rawProperties, currentUserId);
         const fresh = freshProperties.find(property => Number(property.id) === id);
@@ -2115,23 +2209,37 @@
         });
         if (!replaced) properties.push(fresh);
 
-        const scanned = await apiClient.scanMarkets([fresh], { force: Boolean(options && options.force) });
-        const markets = Object.assign({}, state.markets || {}, scanned || {});
+        progress({ phase: 'market', percent: 35, label: 'Searching rental market…' });
+        const scanned = await apiClient.scanMarkets([fresh], {
+          force: Boolean(updateOptions.force),
+          onProgress(entry) {
+            const total = Math.max(1, Number(entry && entry.total) || 1);
+            const done = Math.max(0, Number(entry && entry.done) || 0);
+            const percent = Math.min(92, Math.round(35 + (done / total) * 57));
+            progress({ phase: 'market', percent, label: 'Searching rental market…', done, total });
+          }
+        });
+        const selectedMarket = scanned && scanned[fresh.propertyTypeId] || null;
+        const markets = Object.assign({}, state.markets || {});
+        const propertyMarkets = Object.assign({}, state.propertyMarkets || {}, { [String(id)]: selectedMarket });
         state = Object.assign({}, state, {
           properties,
           markets,
-          rows: computeRows(properties, markets),
+          propertyMarkets,
+          rows: computeRows(properties, markets, propertyMarkets),
           loading: false,
           error: null,
           needsApiKey: false,
           actionMessage: `Property ${id} updated.`,
           scanProgress: null
         });
-        render();
+        progress({ phase: 'complete', percent: 100, label: 'Update complete.' });
+        if (!silent) render();
         return state;
       } catch (error) {
         state = Object.assign({}, state, { error, actionMessage: `Property ${id} update failed.` });
-        render();
+        progress({ phase: 'error', percent: 100, label: 'Update failed.' });
+        if (!silent) render();
         throw error;
       }
     }
@@ -3223,9 +3331,13 @@
     const markets = value.markets && typeof value.markets === 'object' && !Array.isArray(value.markets)
       ? value.markets
       : {};
+    const propertyMarkets = value.propertyMarkets && typeof value.propertyMarkets === 'object' && !Array.isArray(value.propertyMarkets)
+      ? value.propertyMarkets
+      : {};
     return {
       properties: value.properties,
       markets,
+      propertyMarkets,
       updatedAt: timestamp(value.updatedAt),
       propertyUpdatedAt: normalizeTimestampMap(value.propertyUpdatedAt)
     };
@@ -3293,6 +3405,13 @@
     const cancelProperty = typeof config.cancelProperty === 'function'
       ? config.cancelProperty
       : () => ({ submitted: false, reason: 'Cancellation unavailable' });
+    const hasCancelConfirmationBridge = typeof config.canConfirmCancelProperty === 'function' && typeof config.confirmCancelProperty === 'function';
+    const canConfirmCancelProperty = typeof config.canConfirmCancelProperty === 'function'
+      ? config.canConfirmCancelProperty
+      : () => false;
+    const confirmCancelProperty = typeof config.confirmCancelProperty === 'function'
+      ? config.confirmCancelProperty
+      : () => ({ submitted: false, reason: 'Cancellation confirmation unavailable' });
 
     if (!windowLike || !documentLike) throw new TypeError('window and document are required');
 
@@ -3302,15 +3421,20 @@
     let updatedAt = savedSnapshot && Number(savedSnapshot.updatedAt) || 0;
     const propertyUpdatedAt = Object.assign({}, savedSnapshot && savedSnapshot.propertyUpdatedAt || {});
     const updatingProperties = new Set();
+    const updateProgress = new Map();
     const cancellationSent = new Set();
     let updatingAll = false;
     let pendingCancelId = null;
+    let pendingCancelStage = 'idle';
+    let uiObserver = null;
+    let observerScheduled = false;
     let destroyed = false;
 
     if (savedSnapshot && typeof baseController.hydrate === 'function') {
       baseController.hydrate({
         properties: savedSnapshot.properties,
-        markets: savedSnapshot.markets
+        markets: savedSnapshot.markets,
+        propertyMarkets: savedSnapshot.propertyMarkets
       });
       baseController.render();
     }
@@ -3324,6 +3448,7 @@
       return updateCore.saveSnapshot(storage, {
         properties: state.properties || [],
         markets: state.markets || {},
+        propertyMarkets: state.propertyMarkets || {},
         updatedAt,
         propertyUpdatedAt
       });
@@ -3361,23 +3486,48 @@
       return result;
     }
 
+    function updateProgressUi(propertyId) {
+      const id = Number(propertyId);
+      const panel = documentLike.getElementById('r4g3-prm-panel');
+      if (!panel) return;
+      const row = panel.querySelector(`[data-property-id="${id}"]`);
+      if (!row) return;
+      const entry = (baseController.getState().rows || []).find(item => Number(item.property && item.property.id) === id);
+      if (entry) ensureCardControls(row, entry);
+    }
+
     async function updateProperty(propertyId) {
       const id = Number(propertyId);
       if (!Number.isInteger(id) || id <= 0 || updatingProperties.has(id)) return false;
       if (typeof baseController.updateProperty !== 'function') throw new Error('Per-property update support is unavailable');
       updatingProperties.add(id);
-      enhanceMainPanel();
+      updateProgress.set(id, { percent: 5, label: 'Checking property status…' });
+      updateProgressUi(id);
       try {
-        const result = await baseController.updateProperty(id, { force: true });
+        const result = await baseController.updateProperty(id, {
+          force: true,
+          silent: true,
+          onProgress(entry) {
+            updateProgress.set(id, {
+              percent: Math.max(0, Math.min(100, Number(entry && entry.percent) || 0)),
+              label: String(entry && entry.label || 'Updating…')
+            });
+            updateProgressUi(id);
+          }
+        });
         const stamp = now();
         propertyUpdatedAt[String(id)] = stamp;
         updatedAt = Math.max(updatedAt, stamp);
         cancellationSent.delete(id);
-        if (pendingCancelId === id) pendingCancelId = null;
+        if (pendingCancelId === id) {
+          pendingCancelId = null;
+          pendingCancelStage = 'idle';
+        }
         saveCurrentSnapshot();
         return result;
       } finally {
         updatingProperties.delete(id);
+        updateProgress.delete(id);
         renderController();
       }
     }
@@ -3395,7 +3545,10 @@
           cancellationSent.clear();
           if (pendingCancelId != null) {
             const pending = (state.properties || []).find(property => Number(property.id) === Number(pendingCancelId));
-            if (!pending || String(pending.status || '').toLowerCase() !== 'for_rent') pendingCancelId = null;
+            if (!pending || String(pending.status || '').toLowerCase() !== 'for_rent') {
+              pendingCancelId = null;
+              pendingCancelStage = 'idle';
+            }
           }
           saveCurrentSnapshot();
         }
@@ -3417,23 +3570,48 @@
       if (!Number.isInteger(id) || id <= 0) return false;
       if (pendingCancelId !== id) {
         pendingCancelId = id;
+        pendingCancelStage = 'waiting-remove';
         cancellationSent.delete(id);
         prepareCancelProperty(id);
         renderController();
         return true;
       }
 
-      if (!canCancelProperty(id)) {
-        enhanceMainPanel();
-        return false;
-      }
-
-      const result = cancelProperty(id);
-      if (result && result.submitted) {
-        pendingCancelId = null;
-        cancellationSent.add(id);
+      if (pendingCancelStage === 'waiting-remove') {
+        if (!canCancelProperty(id)) {
+          enhanceMainPanel();
+          return false;
+        }
+        const result = cancelProperty(id);
+        if (!(result && result.submitted)) {
+          enhanceMainPanel();
+          return false;
+        }
+        if (!hasCancelConfirmationBridge) {
+          pendingCancelId = null;
+          pendingCancelStage = 'idle';
+          cancellationSent.add(id);
+          renderController();
+          return true;
+        }
+        pendingCancelStage = 'waiting-confirm';
         renderController();
         return true;
+      }
+
+      if (pendingCancelStage === 'waiting-confirm') {
+        if (!canConfirmCancelProperty(id)) {
+          enhanceMainPanel();
+          return false;
+        }
+        const result = confirmCancelProperty(id);
+        if (result && result.submitted) {
+          pendingCancelId = null;
+          pendingCancelStage = 'idle';
+          cancellationSent.add(id);
+          renderController();
+          return true;
+        }
       }
       enhanceMainPanel();
       return false;
@@ -3483,6 +3661,46 @@
       if (updateButton.textContent !== updateText) updateButton.textContent = updateText;
       updateButton.disabled = isUpdating;
 
+      let progress = controls.querySelector('[data-role="v035-update-progress"]');
+      const progressState = updateProgress.get(id);
+      if (progressState) {
+        if (!progress) {
+          progress = documentLike.createElement('div');
+          progress.dataset.role = 'v035-update-progress';
+          progress.style.flexBasis = '100%';
+          progress.style.display = 'grid';
+          progress.style.gap = '4px';
+          const label = documentLike.createElement('small');
+          label.dataset.role = 'v035-update-progress-label';
+          const track = documentLike.createElement('div');
+          track.setAttribute('role', 'progressbar');
+          track.setAttribute('aria-valuemin', '0');
+          track.setAttribute('aria-valuemax', '100');
+          track.style.height = '7px';
+          track.style.border = '1px solid currentColor';
+          track.style.borderRadius = '999px';
+          track.style.overflow = 'hidden';
+          track.style.opacity = '0.85';
+          const fill = documentLike.createElement('div');
+          fill.dataset.role = 'v035-update-progress-fill';
+          fill.style.height = '100%';
+          fill.style.background = 'currentColor';
+          fill.style.transition = 'width 120ms linear';
+          track.appendChild(fill);
+          progress.append(label, track);
+          controls.appendChild(progress);
+        }
+        const amount = Math.max(0, Math.min(100, Number(progressState.percent) || 0));
+        const label = progress.querySelector('[data-role="v035-update-progress-label"]');
+        const track = progress.querySelector('[role="progressbar"]');
+        const fill = progress.querySelector('[data-role="v035-update-progress-fill"]');
+        if (label) label.textContent = `${progressState.label || 'Updating…'} ${Math.round(amount)}%`;
+        if (track) track.setAttribute('aria-valuenow', String(Math.round(amount)));
+        if (fill) fill.style.width = `${amount}%`;
+      } else if (progress && progress.parentNode) {
+        progress.remove();
+      }
+
       const status = String(property.status || '').toLowerCase();
       let cancelButton = controls.querySelector('[data-action="v034-cancel-listing"]');
       let note = row.querySelector('[data-role="v034-cancel-note"]');
@@ -3499,8 +3717,15 @@
           controls.appendChild(cancelButton);
         }
         const pending = pendingCancelId === id;
-        const ready = pending && canCancelProperty(id);
-        const label = pending ? (ready ? 'CONFIRM CANCEL LISTING' : 'WAITING FOR TORN…') : 'CANCEL LISTING';
+        let ready = false;
+        let label = 'CANCEL LISTING';
+        if (pending && pendingCancelStage === 'waiting-remove') {
+          ready = canCancelProperty(id);
+          label = ready ? 'CONFIRM CANCEL LISTING' : 'WAITING FOR TORN…';
+        } else if (pending && pendingCancelStage === 'waiting-confirm') {
+          ready = canConfirmCancelProperty(id);
+          label = ready ? 'FINAL CONFIRM CANCEL' : 'WAITING FOR CONFIRMATION…';
+        }
         if (cancelButton.textContent !== label) cancelButton.textContent = label;
         cancelButton.disabled = pending && !ready;
         if (note && note.parentNode) note.remove();
@@ -3616,27 +3841,50 @@
       let updates = node.querySelector('[data-role="v034-update-settings"]');
       if (!updates) {
         updates = settingsSection('UPDATES');
-        const label = documentLike.createElement('label');
-        label.style.display = 'flex';
-        label.style.alignItems = 'center';
-        label.style.gap = '8px';
-        const checkbox = documentLike.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.dataset.role = 'auto-page-update-input';
-        checkbox.checked = updateSettings.autoPageUpdate;
-        checkbox.addEventListener('change', () => setAutoPageUpdate(checkbox.checked));
-        const text = documentLike.createElement('span');
-        text.textContent = 'Automatic page update';
-        label.append(checkbox, text);
-        const help = documentLike.createElement('small');
-        help.style.opacity = '0.72';
-        help.textContent = 'Off by default. When enabled, update all properties once when the Torn Properties page loads. No background polling.';
-        updates.append(label, help);
         if (apiSection && apiSection.parentNode) apiSection.parentNode.insertBefore(updates, apiSection);
         else node.appendChild(updates);
-      } else {
-        const checkbox = updates.querySelector('[data-role="auto-page-update-input"]');
-        if (checkbox) checkbox.checked = updateSettings.autoPageUpdate;
+      }
+
+      if (!updates.querySelector('[data-action="v035-update-mode-manual"]')) {
+        updates.replaceChildren();
+        const heading = documentLike.createElement('strong');
+        heading.textContent = 'UPDATES';
+        updates.appendChild(heading);
+        const modes = documentLike.createElement('div');
+        modes.style.display = 'grid';
+        modes.style.gridTemplateColumns = '1fr 1fr';
+        modes.style.gap = '8px';
+        const manual = makeButton('MANUAL', 'v035-update-mode-manual');
+        const automatic = makeButton('AUTOMATIC', 'v035-update-mode-automatic');
+        manual.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          setAutoPageUpdate(false);
+        });
+        automatic.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          setAutoPageUpdate(true);
+        });
+        modes.append(manual, automatic);
+        const help = documentLike.createElement('small');
+        help.style.opacity = '0.72';
+        help.textContent = 'Manual: updates only when you press UPDATE or UPDATE ALL. Automatic page update: one UPDATE ALL when the Torn Properties page opens. No background polling.';
+        updates.append(modes, help);
+      }
+
+      const manual = updates.querySelector('[data-action="v035-update-mode-manual"]');
+      const automatic = updates.querySelector('[data-action="v035-update-mode-automatic"]');
+      const auto = updateSettings.autoPageUpdate === true;
+      if (manual) {
+        manual.setAttribute('aria-pressed', String(!auto));
+        manual.style.fontWeight = !auto ? '700' : '400';
+        manual.style.boxShadow = !auto ? 'inset 0 0 0 2px currentColor' : 'none';
+      }
+      if (automatic) {
+        automatic.setAttribute('aria-pressed', String(auto));
+        automatic.style.fontWeight = auto ? '700' : '400';
+        automatic.style.boxShadow = auto ? 'inset 0 0 0 2px currentColor' : 'none';
       }
 
       if (apiSection) {
@@ -3666,6 +3914,37 @@
       return node;
     }
 
+    function installUiObserver() {
+      if (!windowLike.MutationObserver || !documentLike.body || uiObserver) return;
+      uiObserver = new windowLike.MutationObserver(records => {
+        let settingsAdded = false;
+        let nativeCancelChanged = false;
+        for (const record of records) {
+          const target = record.target;
+          const inManager = target && target.closest && target.closest('#r4g3-prm-panel, #r4g3-prm-settings-window');
+          for (const added of record.addedNodes || []) {
+            if (!added || added.nodeType !== 1) continue;
+            if (added.matches && added.matches('#r4g3-prm-settings-window') || added.querySelector && added.querySelector('#r4g3-prm-settings-window')) {
+              settingsAdded = true;
+            }
+          }
+          if (pendingCancelId != null && !inManager) nativeCancelChanged = true;
+        }
+        if (!settingsAdded && !nativeCancelChanged) return;
+        if (observerScheduled) return;
+        observerScheduled = true;
+        const schedule = typeof windowLike.queueMicrotask === 'function'
+          ? windowLike.queueMicrotask.bind(windowLike)
+          : callback => windowLike.setTimeout(callback, 0);
+        schedule(() => {
+          observerScheduled = false;
+          if (settingsAdded) enhanceSettingsWindow();
+          if (nativeCancelChanged) enhanceMainPanel();
+        });
+      });
+      uiObserver.observe(documentLike.body, { childList: true, subtree: true });
+    }
+
     const controller = Object.assign({}, baseController, {
       load: updateAll,
       updateAll,
@@ -3685,10 +3964,13 @@
       setAutoPageUpdate,
       destroy() {
         destroyed = true;
+        if (uiObserver) uiObserver.disconnect();
+        uiObserver = null;
         return baseController.destroy();
       }
     });
 
+    installUiObserver();
     enhanceMainPanel();
     enhanceSettingsWindow();
     return Object.freeze(controller);
@@ -4129,6 +4411,20 @@
       },
       cancelProperty(propertyId) {
         return R4G3FormCore.cancelRentalListingFromUserGesture({
+          document: win.document,
+          location: win.location,
+          propertyId
+        });
+      },
+      canConfirmCancelProperty(propertyId) {
+        return R4G3FormCore.canConfirmRentalCancellation({
+          document: win.document,
+          location: win.location,
+          propertyId
+        });
+      },
+      confirmCancelProperty(propertyId) {
+        return R4G3FormCore.confirmRentalCancellationFromUserGesture({
           document: win.document,
           location: win.location,
           propertyId

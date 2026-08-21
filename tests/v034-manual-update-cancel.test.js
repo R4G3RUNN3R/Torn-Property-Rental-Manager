@@ -190,11 +190,12 @@ test('individual UPDATE refreshes only that property and persists the new snapsh
   assert.equal(saved.properties.length, 3);
 });
 
-test('settings expose automatic page update and read-only 80 per minute API safety information', () => {
+test('settings expose manual and automatic update modes with read-only API safety information', () => {
   const { dom, controller } = createV034Controller();
   controller.openSettings();
   const settings = dom.window.document.querySelector('#r4g3-prm-settings-window');
-  assert.ok(settings.querySelector('[data-role="auto-page-update-input"]'));
+  assert.ok(settings.querySelector('[data-action="v035-update-mode-manual"]'));
+  assert.ok(settings.querySelector('[data-action="v035-update-mode-automatic"]'));
   assert.match(settings.textContent, /80\s*\/\s*minute/i);
   assert.match(settings.textContent, /750\s*ms/i);
 });

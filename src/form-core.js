@@ -222,16 +222,27 @@
     };
   }
 
+  function compactText(node) {
+    return String(
+      node && (node.textContent || node.value) ||
+      node && node.getAttribute && (node.getAttribute('aria-label') || node.getAttribute('title')) || ''
+    ).replace(/\s+/g, ' ').trim();
+  }
+
+  function isInsideManager(node) {
+    return Boolean(node && node.closest && node.closest('#r4g3-prm-panel, #r4g3-prm-settings-window'));
+  }
+
+  function isDialogContainer(node) {
+    return Boolean(node && node.closest && node.closest('dialog, [role="dialog"], [aria-modal="true"]'));
+  }
+
   function findRentalCancelButton(documentLike) {
     if (!documentLike || typeof documentLike.querySelectorAll !== 'function') return null;
-    const scope = documentLike.querySelector('#market') || documentLike;
-    const candidates = [...scope.querySelectorAll('button, a, input[type="button"], input[type="submit"]')];
+    const candidates = [...documentLike.querySelectorAll('button, a, input[type="button"], input[type="submit"]')];
     return candidates.find(candidate => {
-      if (candidate.closest && candidate.closest('#r4g3-prm-panel, #r4g3-prm-settings-window')) return false;
-      const text = String(
-        candidate.textContent || candidate.value ||
-        candidate.getAttribute && (candidate.getAttribute('aria-label') || candidate.getAttribute('title')) || ''
-      ).replace(/\s+/g, ' ').trim();
+      if (isInsideManager(candidate) || isDialogContainer(candidate)) return false;
+      const text = compactText(candidate);
       return /remove\s+(?:this\s+)?(?:property\s+)?from\s+(?:the\s+)?market/i.test(text) ||
         /(?:remove|cancel|withdraw)\s+(?:rental\s+)?listing/i.test(text) ||
         /^delist$/i.test(text);
@@ -265,6 +276,66 @@
     return { submitted: true, propertyId };
   }
 
+  function cancellationDialogText(node) {
+    return compactText(node).toLowerCase();
+  }
+
+  function isRentalCancellationDialog(node) {
+    if (!node || isInsideManager(node)) return false;
+    const text = cancellationDialogText(node);
+    const removeMarket = /remove.{0,80}(?:property|rental|listing).{0,80}(?:market)/i.test(text) ||
+      /(?:property|rental|listing).{0,80}remove.{0,80}(?:market)/i.test(text) ||
+      /remove.{0,80}from.{0,30}market/i.test(text);
+    const confirmation = /are you sure|confirm|confirmation|yes|remove/i.test(text);
+    return removeMarket && confirmation;
+  }
+
+  function findRentalCancelConfirmationButton(documentLike) {
+    if (!documentLike || typeof documentLike.querySelectorAll !== 'function') return null;
+    const explicitDialogs = [...documentLike.querySelectorAll('dialog, [role="dialog"], [aria-modal="true"]')];
+    const dialogs = explicitDialogs.filter(isRentalCancellationDialog);
+    for (const dialog of dialogs) {
+      const candidates = [...dialog.querySelectorAll('button, a, input[type="button"], input[type="submit"]')];
+      const button = candidates.find(candidate => {
+        if (isInsideManager(candidate)) return false;
+        const text = compactText(candidate);
+        if (/^(?:no|cancel|back|close)$/i.test(text)) return false;
+        return /^(?:yes|confirm|ok|okay)$/i.test(text) ||
+          /(?:confirm|remove).{0,40}(?:property|listing|market)/i.test(text) ||
+          /remove\s+(?:this\s+)?(?:property\s+)?from\s+(?:the\s+)?market/i.test(text);
+      });
+      if (button) return button;
+    }
+    return null;
+  }
+
+  function canConfirmRentalCancellation(options) {
+    const config = options || {};
+    const propertyId = positiveInteger(config.propertyId);
+    const routeId = parseLeasePropertyId(config.location);
+    if (!propertyId || routeId !== propertyId) return false;
+    const button = findRentalCancelConfirmationButton(config.document);
+    if (!button || button.disabled) return false;
+    if (button.getAttribute && button.getAttribute('aria-disabled') === 'true') return false;
+    return true;
+  }
+
+  function confirmRentalCancellationFromUserGesture(options) {
+    const config = options || {};
+    const propertyId = positiveInteger(config.propertyId);
+    const routeId = parseLeasePropertyId(config.location);
+    if (!propertyId || routeId !== propertyId) {
+      return { submitted: false, reason: 'Matching rental listing route is not ready' };
+    }
+    const button = findRentalCancelConfirmationButton(config.document);
+    if (!button) return { submitted: false, reason: 'Rental cancellation confirmation not recognized' };
+    if (button.disabled || button.getAttribute && button.getAttribute('aria-disabled') === 'true') {
+      return { submitted: false, reason: 'Rental cancellation confirmation is disabled' };
+    }
+    button.click();
+    return { submitted: true, propertyId };
+  }
+
   return Object.freeze({
     parseLeasePropertyId,
     findLeaseForm,
@@ -275,6 +346,9 @@
     submitLeaseFromUserGesture,
     findRentalCancelButton,
     canCancelRentalListing,
-    cancelRentalListingFromUserGesture
+    cancelRentalListingFromUserGesture,
+    findRentalCancelConfirmationButton,
+    canConfirmRentalCancellation,
+    confirmRentalCancellationFromUserGesture
   });
 }));

@@ -23,6 +23,13 @@
     const cancelProperty = typeof config.cancelProperty === 'function'
       ? config.cancelProperty
       : () => ({ submitted: false, reason: 'Cancellation unavailable' });
+    const hasCancelConfirmationBridge = typeof config.canConfirmCancelProperty === 'function' && typeof config.confirmCancelProperty === 'function';
+    const canConfirmCancelProperty = typeof config.canConfirmCancelProperty === 'function'
+      ? config.canConfirmCancelProperty
+      : () => false;
+    const confirmCancelProperty = typeof config.confirmCancelProperty === 'function'
+      ? config.confirmCancelProperty
+      : () => ({ submitted: false, reason: 'Cancellation confirmation unavailable' });
 
     if (!windowLike || !documentLike) throw new TypeError('window and document are required');
 
@@ -32,15 +39,20 @@
     let updatedAt = savedSnapshot && Number(savedSnapshot.updatedAt) || 0;
     const propertyUpdatedAt = Object.assign({}, savedSnapshot && savedSnapshot.propertyUpdatedAt || {});
     const updatingProperties = new Set();
+    const updateProgress = new Map();
     const cancellationSent = new Set();
     let updatingAll = false;
     let pendingCancelId = null;
+    let pendingCancelStage = 'idle';
+    let uiObserver = null;
+    let observerScheduled = false;
     let destroyed = false;
 
     if (savedSnapshot && typeof baseController.hydrate === 'function') {
       baseController.hydrate({
         properties: savedSnapshot.properties,
-        markets: savedSnapshot.markets
+        markets: savedSnapshot.markets,
+        propertyMarkets: savedSnapshot.propertyMarkets
       });
       baseController.render();
     }
@@ -54,6 +66,7 @@
       return updateCore.saveSnapshot(storage, {
         properties: state.properties || [],
         markets: state.markets || {},
+        propertyMarkets: state.propertyMarkets || {},
         updatedAt,
         propertyUpdatedAt
       });
@@ -91,23 +104,48 @@
       return result;
     }
 
+    function updateProgressUi(propertyId) {
+      const id = Number(propertyId);
+      const panel = documentLike.getElementById('r4g3-prm-panel');
+      if (!panel) return;
+      const row = panel.querySelector(`[data-property-id="${id}"]`);
+      if (!row) return;
+      const entry = (baseController.getState().rows || []).find(item => Number(item.property && item.property.id) === id);
+      if (entry) ensureCardControls(row, entry);
+    }
+
     async function updateProperty(propertyId) {
       const id = Number(propertyId);
       if (!Number.isInteger(id) || id <= 0 || updatingProperties.has(id)) return false;
       if (typeof baseController.updateProperty !== 'function') throw new Error('Per-property update support is unavailable');
       updatingProperties.add(id);
-      enhanceMainPanel();
+      updateProgress.set(id, { percent: 5, label: 'Checking property status…' });
+      updateProgressUi(id);
       try {
-        const result = await baseController.updateProperty(id, { force: true });
+        const result = await baseController.updateProperty(id, {
+          force: true,
+          silent: true,
+          onProgress(entry) {
+            updateProgress.set(id, {
+              percent: Math.max(0, Math.min(100, Number(entry && entry.percent) || 0)),
+              label: String(entry && entry.label || 'Updating…')
+            });
+            updateProgressUi(id);
+          }
+        });
         const stamp = now();
         propertyUpdatedAt[String(id)] = stamp;
         updatedAt = Math.max(updatedAt, stamp);
         cancellationSent.delete(id);
-        if (pendingCancelId === id) pendingCancelId = null;
+        if (pendingCancelId === id) {
+          pendingCancelId = null;
+          pendingCancelStage = 'idle';
+        }
         saveCurrentSnapshot();
         return result;
       } finally {
         updatingProperties.delete(id);
+        updateProgress.delete(id);
         renderController();
       }
     }
@@ -125,7 +163,10 @@
           cancellationSent.clear();
           if (pendingCancelId != null) {
             const pending = (state.properties || []).find(property => Number(property.id) === Number(pendingCancelId));
-            if (!pending || String(pending.status || '').toLowerCase() !== 'for_rent') pendingCancelId = null;
+            if (!pending || String(pending.status || '').toLowerCase() !== 'for_rent') {
+              pendingCancelId = null;
+              pendingCancelStage = 'idle';
+            }
           }
           saveCurrentSnapshot();
         }
@@ -147,23 +188,48 @@
       if (!Number.isInteger(id) || id <= 0) return false;
       if (pendingCancelId !== id) {
         pendingCancelId = id;
+        pendingCancelStage = 'waiting-remove';
         cancellationSent.delete(id);
         prepareCancelProperty(id);
         renderController();
         return true;
       }
 
-      if (!canCancelProperty(id)) {
-        enhanceMainPanel();
-        return false;
-      }
-
-      const result = cancelProperty(id);
-      if (result && result.submitted) {
-        pendingCancelId = null;
-        cancellationSent.add(id);
+      if (pendingCancelStage === 'waiting-remove') {
+        if (!canCancelProperty(id)) {
+          enhanceMainPanel();
+          return false;
+        }
+        const result = cancelProperty(id);
+        if (!(result && result.submitted)) {
+          enhanceMainPanel();
+          return false;
+        }
+        if (!hasCancelConfirmationBridge) {
+          pendingCancelId = null;
+          pendingCancelStage = 'idle';
+          cancellationSent.add(id);
+          renderController();
+          return true;
+        }
+        pendingCancelStage = 'waiting-confirm';
         renderController();
         return true;
+      }
+
+      if (pendingCancelStage === 'waiting-confirm') {
+        if (!canConfirmCancelProperty(id)) {
+          enhanceMainPanel();
+          return false;
+        }
+        const result = confirmCancelProperty(id);
+        if (result && result.submitted) {
+          pendingCancelId = null;
+          pendingCancelStage = 'idle';
+          cancellationSent.add(id);
+          renderController();
+          return true;
+        }
       }
       enhanceMainPanel();
       return false;
@@ -213,6 +279,46 @@
       if (updateButton.textContent !== updateText) updateButton.textContent = updateText;
       updateButton.disabled = isUpdating;
 
+      let progress = controls.querySelector('[data-role="v035-update-progress"]');
+      const progressState = updateProgress.get(id);
+      if (progressState) {
+        if (!progress) {
+          progress = documentLike.createElement('div');
+          progress.dataset.role = 'v035-update-progress';
+          progress.style.flexBasis = '100%';
+          progress.style.display = 'grid';
+          progress.style.gap = '4px';
+          const label = documentLike.createElement('small');
+          label.dataset.role = 'v035-update-progress-label';
+          const track = documentLike.createElement('div');
+          track.setAttribute('role', 'progressbar');
+          track.setAttribute('aria-valuemin', '0');
+          track.setAttribute('aria-valuemax', '100');
+          track.style.height = '7px';
+          track.style.border = '1px solid currentColor';
+          track.style.borderRadius = '999px';
+          track.style.overflow = 'hidden';
+          track.style.opacity = '0.85';
+          const fill = documentLike.createElement('div');
+          fill.dataset.role = 'v035-update-progress-fill';
+          fill.style.height = '100%';
+          fill.style.background = 'currentColor';
+          fill.style.transition = 'width 120ms linear';
+          track.appendChild(fill);
+          progress.append(label, track);
+          controls.appendChild(progress);
+        }
+        const amount = Math.max(0, Math.min(100, Number(progressState.percent) || 0));
+        const label = progress.querySelector('[data-role="v035-update-progress-label"]');
+        const track = progress.querySelector('[role="progressbar"]');
+        const fill = progress.querySelector('[data-role="v035-update-progress-fill"]');
+        if (label) label.textContent = `${progressState.label || 'Updating…'} ${Math.round(amount)}%`;
+        if (track) track.setAttribute('aria-valuenow', String(Math.round(amount)));
+        if (fill) fill.style.width = `${amount}%`;
+      } else if (progress && progress.parentNode) {
+        progress.remove();
+      }
+
       const status = String(property.status || '').toLowerCase();
       let cancelButton = controls.querySelector('[data-action="v034-cancel-listing"]');
       let note = row.querySelector('[data-role="v034-cancel-note"]');
@@ -229,8 +335,15 @@
           controls.appendChild(cancelButton);
         }
         const pending = pendingCancelId === id;
-        const ready = pending && canCancelProperty(id);
-        const label = pending ? (ready ? 'CONFIRM CANCEL LISTING' : 'WAITING FOR TORN…') : 'CANCEL LISTING';
+        let ready = false;
+        let label = 'CANCEL LISTING';
+        if (pending && pendingCancelStage === 'waiting-remove') {
+          ready = canCancelProperty(id);
+          label = ready ? 'CONFIRM CANCEL LISTING' : 'WAITING FOR TORN…';
+        } else if (pending && pendingCancelStage === 'waiting-confirm') {
+          ready = canConfirmCancelProperty(id);
+          label = ready ? 'FINAL CONFIRM CANCEL' : 'WAITING FOR CONFIRMATION…';
+        }
         if (cancelButton.textContent !== label) cancelButton.textContent = label;
         cancelButton.disabled = pending && !ready;
         if (note && note.parentNode) note.remove();
@@ -346,27 +459,50 @@
       let updates = node.querySelector('[data-role="v034-update-settings"]');
       if (!updates) {
         updates = settingsSection('UPDATES');
-        const label = documentLike.createElement('label');
-        label.style.display = 'flex';
-        label.style.alignItems = 'center';
-        label.style.gap = '8px';
-        const checkbox = documentLike.createElement('input');
-        checkbox.type = 'checkbox';
-        checkbox.dataset.role = 'auto-page-update-input';
-        checkbox.checked = updateSettings.autoPageUpdate;
-        checkbox.addEventListener('change', () => setAutoPageUpdate(checkbox.checked));
-        const text = documentLike.createElement('span');
-        text.textContent = 'Automatic page update';
-        label.append(checkbox, text);
-        const help = documentLike.createElement('small');
-        help.style.opacity = '0.72';
-        help.textContent = 'Off by default. When enabled, update all properties once when the Torn Properties page loads. No background polling.';
-        updates.append(label, help);
         if (apiSection && apiSection.parentNode) apiSection.parentNode.insertBefore(updates, apiSection);
         else node.appendChild(updates);
-      } else {
-        const checkbox = updates.querySelector('[data-role="auto-page-update-input"]');
-        if (checkbox) checkbox.checked = updateSettings.autoPageUpdate;
+      }
+
+      if (!updates.querySelector('[data-action="v035-update-mode-manual"]')) {
+        updates.replaceChildren();
+        const heading = documentLike.createElement('strong');
+        heading.textContent = 'UPDATES';
+        updates.appendChild(heading);
+        const modes = documentLike.createElement('div');
+        modes.style.display = 'grid';
+        modes.style.gridTemplateColumns = '1fr 1fr';
+        modes.style.gap = '8px';
+        const manual = makeButton('MANUAL', 'v035-update-mode-manual');
+        const automatic = makeButton('AUTOMATIC', 'v035-update-mode-automatic');
+        manual.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          setAutoPageUpdate(false);
+        });
+        automatic.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          setAutoPageUpdate(true);
+        });
+        modes.append(manual, automatic);
+        const help = documentLike.createElement('small');
+        help.style.opacity = '0.72';
+        help.textContent = 'Manual: updates only when you press UPDATE or UPDATE ALL. Automatic page update: one UPDATE ALL when the Torn Properties page opens. No background polling.';
+        updates.append(modes, help);
+      }
+
+      const manual = updates.querySelector('[data-action="v035-update-mode-manual"]');
+      const automatic = updates.querySelector('[data-action="v035-update-mode-automatic"]');
+      const auto = updateSettings.autoPageUpdate === true;
+      if (manual) {
+        manual.setAttribute('aria-pressed', String(!auto));
+        manual.style.fontWeight = !auto ? '700' : '400';
+        manual.style.boxShadow = !auto ? 'inset 0 0 0 2px currentColor' : 'none';
+      }
+      if (automatic) {
+        automatic.setAttribute('aria-pressed', String(auto));
+        automatic.style.fontWeight = auto ? '700' : '400';
+        automatic.style.boxShadow = auto ? 'inset 0 0 0 2px currentColor' : 'none';
       }
 
       if (apiSection) {
@@ -396,6 +532,37 @@
       return node;
     }
 
+    function installUiObserver() {
+      if (!windowLike.MutationObserver || !documentLike.body || uiObserver) return;
+      uiObserver = new windowLike.MutationObserver(records => {
+        let settingsAdded = false;
+        let nativeCancelChanged = false;
+        for (const record of records) {
+          const target = record.target;
+          const inManager = target && target.closest && target.closest('#r4g3-prm-panel, #r4g3-prm-settings-window');
+          for (const added of record.addedNodes || []) {
+            if (!added || added.nodeType !== 1) continue;
+            if (added.matches && added.matches('#r4g3-prm-settings-window') || added.querySelector && added.querySelector('#r4g3-prm-settings-window')) {
+              settingsAdded = true;
+            }
+          }
+          if (pendingCancelId != null && !inManager) nativeCancelChanged = true;
+        }
+        if (!settingsAdded && !nativeCancelChanged) return;
+        if (observerScheduled) return;
+        observerScheduled = true;
+        const schedule = typeof windowLike.queueMicrotask === 'function'
+          ? windowLike.queueMicrotask.bind(windowLike)
+          : callback => windowLike.setTimeout(callback, 0);
+        schedule(() => {
+          observerScheduled = false;
+          if (settingsAdded) enhanceSettingsWindow();
+          if (nativeCancelChanged) enhanceMainPanel();
+        });
+      });
+      uiObserver.observe(documentLike.body, { childList: true, subtree: true });
+    }
+
     const controller = Object.assign({}, baseController, {
       load: updateAll,
       updateAll,
@@ -415,10 +582,13 @@
       setAutoPageUpdate,
       destroy() {
         destroyed = true;
+        if (uiObserver) uiObserver.disconnect();
+        uiObserver = null;
         return baseController.destroy();
       }
     });
 
+    installUiObserver();
     enhanceMainPanel();
     enhanceSettingsWindow();
     return Object.freeze(controller);

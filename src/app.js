@@ -130,6 +130,7 @@
     let state = {
       properties: [],
       markets: {},
+      propertyMarkets: {},
       rows: [],
       loading: false,
       error: null,
@@ -170,9 +171,11 @@
       return fixedApiClient;
     }
 
-    function computeRows(properties, markets) {
+    function computeRows(properties, markets, propertyMarkets) {
+      const perProperty = propertyMarkets && typeof propertyMarkets === 'object' ? propertyMarkets : {};
       return properties.map(property => {
-        const market = markets && markets[property.propertyTypeId];
+        const propertyMarket = perProperty[property.id] || perProperty[String(property.id)];
+        const market = propertyMarket || markets && markets[property.propertyTypeId];
         const quote = marketCore.rentalQuote(
           property,
           market && Array.isArray(market.rentals) ? market.rentals : [],
@@ -531,7 +534,7 @@
         const markets = Object.assign({}, state.markets, { [id]: market });
         state = Object.assign({}, state, {
           markets,
-          rows: computeRows(state.properties, markets),
+          rows: computeRows(state.properties, markets, state.propertyMarkets),
           actionMessage: `Market ${id} refreshed.`
         });
         render();
@@ -540,7 +543,7 @@
         const markets = Object.assign({}, state.markets, {
           [id]: { rentals: [], error: String(error && error.message || error) }
         });
-        state = Object.assign({}, state, { markets, rows: computeRows(state.properties, markets), actionMessage: `Market ${id} retry failed.` });
+        state = Object.assign({}, state, { markets, rows: computeRows(state.properties, markets, state.propertyMarkets), actionMessage: `Market ${id} retry failed.` });
         render();
         return false;
       }
@@ -608,7 +611,7 @@
           const patch = { undercutPercent: fields.undercutPercent };
           if (fields.apiKey) patch.apiKey = fields.apiKey;
           persistSettings(patch);
-          state.rows = computeRows(state.properties, state.markets);
+          state.rows = computeRows(state.properties, state.markets, state.propertyMarkets);
           render();
           return;
         }
@@ -797,6 +800,7 @@
         state = {
           properties: [],
           markets: {},
+          propertyMarkets: {},
           rows: [],
           loading: false,
           error: null,
@@ -821,7 +825,8 @@
         state = Object.assign({}, state, {
           properties,
           markets: {},
-          rows: computeRows(properties, {}),
+          propertyMarkets: {},
+          rows: computeRows(properties, {}, {}),
           scanProgress: { done: 0, total: typeIds.length }
         });
         render();
@@ -832,14 +837,16 @@
             const nextMarkets = Object.assign({}, state.markets, { [entry.id]: entry.market });
             state = Object.assign({}, state, {
               markets: nextMarkets,
-              rows: computeRows(properties, nextMarkets),
+              propertyMarkets: {},
+              rows: computeRows(properties, nextMarkets, {}),
               scanProgress: { done: entry.done, total: entry.total }
             });
             render();
           }
         });
-        const rows = computeRows(properties, markets);
-        state = { properties, markets, rows, loading: false, error: null, needsApiKey: false, actionMessage: '', scanProgress: null };
+        const propertyMarkets = {};
+        const rows = computeRows(properties, markets, propertyMarkets);
+        state = { properties, markets, propertyMarkets, rows, loading: false, error: null, needsApiKey: false, actionMessage: '', scanProgress: null };
         render();
         return state;
       } catch (error) {
@@ -863,10 +870,14 @@
       const markets = source.markets && typeof source.markets === 'object' && !Array.isArray(source.markets)
         ? Object.assign({}, source.markets)
         : {};
+      const propertyMarkets = source.propertyMarkets && typeof source.propertyMarkets === 'object' && !Array.isArray(source.propertyMarkets)
+        ? Object.assign({}, source.propertyMarkets)
+        : {};
       state = {
         properties,
         markets,
-        rows: computeRows(properties, markets),
+        propertyMarkets,
+        rows: computeRows(properties, markets, propertyMarkets),
         loading: false,
         error: null,
         needsApiKey: false,
@@ -879,20 +890,29 @@
 
     async function updateProperty(propertyId, options) {
       const id = Number(propertyId);
+      const updateOptions = options || {};
+      const silent = updateOptions.silent === true;
+      const onProgress = typeof updateOptions.onProgress === 'function' ? updateOptions.onProgress : null;
+      const progress = value => {
+        if (!onProgress) return;
+        try { onProgress(Object.assign({ propertyId: id }, value || {})); } catch (error) { /* UI progress must never break an update. */ }
+      };
       if (!Number.isInteger(id) || id <= 0) throw new TypeError('A positive property ID is required');
       if (apiClientFactory && !settings.apiKey) {
         settingsOpen = true;
         state = Object.assign({}, state, { needsApiKey: true, error: null });
-        render();
+        if (!silent) render();
         return state;
       }
       const apiClient = getApiClient();
       state = Object.assign({}, state, { error: null, needsApiKey: false, actionMessage: `Updating property ${id}…` });
-      render();
+      progress({ phase: 'property', percent: 5, label: 'Checking property status…' });
+      if (!silent) render();
       try {
         const currentUserId = typeof apiClient.fetchCurrentUserId === 'function'
           ? await apiClient.fetchCurrentUserId()
           : null;
+        progress({ phase: 'property', percent: 20, label: 'Loading current property state…' });
         const rawProperties = await apiClient.fetchOwnedProperties();
         const freshProperties = propertyCore.normalizeProperties(rawProperties, currentUserId);
         const fresh = freshProperties.find(property => Number(property.id) === id);
@@ -906,23 +926,37 @@
         });
         if (!replaced) properties.push(fresh);
 
-        const scanned = await apiClient.scanMarkets([fresh], { force: Boolean(options && options.force) });
-        const markets = Object.assign({}, state.markets || {}, scanned || {});
+        progress({ phase: 'market', percent: 35, label: 'Searching rental market…' });
+        const scanned = await apiClient.scanMarkets([fresh], {
+          force: Boolean(updateOptions.force),
+          onProgress(entry) {
+            const total = Math.max(1, Number(entry && entry.total) || 1);
+            const done = Math.max(0, Number(entry && entry.done) || 0);
+            const percent = Math.min(92, Math.round(35 + (done / total) * 57));
+            progress({ phase: 'market', percent, label: 'Searching rental market…', done, total });
+          }
+        });
+        const selectedMarket = scanned && scanned[fresh.propertyTypeId] || null;
+        const markets = Object.assign({}, state.markets || {});
+        const propertyMarkets = Object.assign({}, state.propertyMarkets || {}, { [String(id)]: selectedMarket });
         state = Object.assign({}, state, {
           properties,
           markets,
-          rows: computeRows(properties, markets),
+          propertyMarkets,
+          rows: computeRows(properties, markets, propertyMarkets),
           loading: false,
           error: null,
           needsApiKey: false,
           actionMessage: `Property ${id} updated.`,
           scanProgress: null
         });
-        render();
+        progress({ phase: 'complete', percent: 100, label: 'Update complete.' });
+        if (!silent) render();
         return state;
       } catch (error) {
         state = Object.assign({}, state, { error, actionMessage: `Property ${id} update failed.` });
-        render();
+        progress({ phase: 'error', percent: 100, label: 'Update failed.' });
+        if (!silent) render();
         throw error;
       }
     }

@@ -25,34 +25,13 @@ jobs:
         run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
-      - name: Patch v0.3.4 README
-        run: |
-          node <<'NODE'
-          const fs = require('node:fs');
-          const path = 'README.md';
-          let source = fs.readFileSync(path, 'utf8');
-          source = source.replace('## What v0.3.2 does', '## What v0.3.4 does');
-          if (!source.includes('### New in v0.3.4')) {
-            const marker = '### New in v0.3.2';
-            const section = `### New in v0.3.4\n\n- **Manual updates by default:** opening Torn Properties or the manager does not refresh the Torn API automatically.\n- Every property card has its own **UPDATE** action, and the header has **UPDATE ALL**.\n- The manager saves the last known property and market snapshot locally so reopening the page can display useful data without an API request.\n- Each property shows a **Last updated** time. Individual updates refresh verified owned-property state and only that property's rental-market type.\n- Settings includes **Automatic page update**, default **OFF**. When enabled it performs one UPDATE ALL when Torn Properties loads; there is no background polling.\n- Unaccepted **for_rent** listings can be removed through staged **CANCEL LISTING → CONFIRM CANCEL LISTING**. Only the second explicit click may invoke Torn's native remove control.\n- After cancellation, **UPDATE PROPERTY** is required to verify Torn returned the property to an available state before repricing/relisting.\n- Active **rented** leases do not expose cancellation.\n- Shared Torn API pacing is **80 request starts per rolling 60 seconds**, at least **750 ms between starts**, with the existing 60-second rate-limit cooldown.\n- Exact-upgrade pricing, Lowest / Median / Average / Highest basis, undercut settings, sorting, and **PREPARE RENTAL → LIST PROPERTY** safety remain unchanged.\n\n`;
-            if (!source.includes(marker)) throw new Error('README v0.3.2 marker missing');
-            source = source.replace(marker, section + marker);
-          }
-          source = source.replaceAll('75 Torn API request starts per rolling 60 seconds', '80 Torn API request starts per rolling 60 seconds');
-          source = source.replaceAll('at least **800 ms between request starts**', 'at least **750 ms between request starts**');
-          source = source.replaceAll('minimum **800 ms** between Torn API request starts', 'minimum **750 ms** between Torn API request starts');
-          source = source.replaceAll('maximum **75 request starts per rolling 60 seconds**', 'maximum **80 request starts per rolling 60 seconds**');
-          source = source.replace('Save settings and press **Refresh**.', 'Save the API key and press **UPDATE ALL**.');
-          source = source.replace('## v0.3.2 non-goals', '## v0.3.4 non-goals');
-          fs.writeFileSync(path, source, 'utf8');
-          NODE
       - name: Build deterministic userscript
         run: npm run build
       - name: Commit release artifacts
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add package-lock.json README.md R4G3RUNN3R-Property-Rental-Manager.user.js
+          git add package-lock.json R4G3RUNN3R-Property-Rental-Manager.user.js
           if git diff --cached --quiet; then
             echo "Release files already current"
           else

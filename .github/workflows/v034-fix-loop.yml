@@ -36,3 +36,5 @@ jobs:
           git add src/app-v034.js
           git commit -m "fix: avoid redundant v0.3.4 DOM observer"
           git push origin HEAD:feature/v0.3.4-manual-updates-cancel
+
+# Trigger after workflow creation.

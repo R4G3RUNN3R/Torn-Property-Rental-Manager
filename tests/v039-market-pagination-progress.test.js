@@ -105,7 +105,7 @@ test('individual property progress visibly advances during rental pagination bef
     navigate() {}
   });
   controller.hydrate({ properties: PropertyCore.normalizeProperties([raw], 1), markets: {} });
-  controller.open();
+  controller.render();
 
   const pending = controller.updateProperty(101);
   await new Promise(resolve => setTimeout(resolve, 0));

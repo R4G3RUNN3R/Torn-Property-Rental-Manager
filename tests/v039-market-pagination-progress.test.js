@@ -78,6 +78,10 @@ test('individual property progress visibly advances during rental pagination bef
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://www.torn.com/properties.php' });
   let releaseScan;
   const scanGate = new Promise(resolve => { releaseScan = resolve; });
+  let callbackSeen = false;
+  let rowPresentInCallback = false;
+  let controlsPresentInCallback = false;
+  let pageProgressPresentInCallback = false;
   const raw = { id: 101, property: { id: 1, name: 'Apartment' }, owner: { id: 1 }, happy: 100, status: 'none', modifications: [] };
   const apiClient = {
     async fetchCurrentUserId() { return 1; },
@@ -85,7 +89,12 @@ test('individual property progress visibly advances during rental pagination bef
     async scanMarkets(properties, options) {
       assert.equal(properties.length, 1);
       assert.equal(typeof options.onPageProgress, 'function');
+      callbackSeen = true;
       options.onPageProgress({ id: 1, donePages: 1, totalPages: 4, rowsDone: 100, totalRows: 350 });
+      const callbackRow = dom.window.document.querySelector('[data-property-id="101"]');
+      rowPresentInCallback = Boolean(callbackRow);
+      controlsPresentInCallback = Boolean(callbackRow && callbackRow.querySelector('[data-role="v034-card-controls"]'));
+      pageProgressPresentInCallback = Boolean(callbackRow && callbackRow.querySelector('[data-role="v039-market-page-progress"]'));
       await scanGate;
       if (typeof options.onProgress === 'function') {
         options.onProgress({ id: 1, done: 1, total: 1, market: { rentals: rentalRows(2, 0), fromCache: false } });
@@ -107,14 +116,23 @@ test('individual property progress visibly advances during rental pagination bef
   controller.hydrate({ properties: PropertyCore.normalizeProperties([raw], 1), markets: {} });
   controller.render();
 
+  const before = dom.window.document.querySelector('[data-property-id="101"]');
+  assert.ok(before, 'property row should be rendered before the scan starts');
+  assert.ok(before.querySelector('[data-role="v034-card-controls"]'), 'property controls should be rendered before the scan starts');
+
   const pending = controller.updateProperty(101);
   await new Promise(resolve => setTimeout(resolve, 0));
+
+  assert.equal(callbackSeen, true, 'page progress callback should fire');
+  assert.equal(rowPresentInCallback, true, 'property row should exist inside page callback');
+  assert.equal(controlsPresentInCallback, true, 'property controls should exist inside page callback');
+  assert.equal(pageProgressPresentInCallback, true, 'v0.3.9 progress should exist immediately after the page callback');
 
   const row = dom.window.document.querySelector('[data-property-id="101"]');
   const pageProgress = row && row.querySelector('[data-role="v039-market-page-progress"]');
   const bar = pageProgress && pageProgress.querySelector('[role="progressbar"]');
   const label = pageProgress && pageProgress.querySelector('[data-role="v039-market-page-progress-label"]');
-  assert.ok(bar, 'individual market scan should show observer-safe page progress');
+  assert.ok(bar, 'individual market scan should show observer-safe page progress after a task tick');
   const percent = Number(bar.getAttribute('aria-valuenow'));
   assert.ok(percent > 35 && percent < 92, `expected visible page progress between 35 and 92, saw ${percent}`);
   assert.match(label.textContent, /page\s+1\s*\/\s*4/i);

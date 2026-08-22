@@ -1,0 +1,44 @@
+name: v038-package
+
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/v0.3.8-property-only-startup
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+      - name: Refresh lock metadata
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Build userscript
+        run: npm run build
+      - name: Verify v0.3.8 before committing generated files
+        run: |
+          npm test
+          npm run check
+          npm run build:check
+      - name: Commit generated release files only
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json R4G3RUNN3R-Property-Rental-Manager.user.js
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m "build: generate v0.3.8 userscript"
+          git push origin HEAD:feat/v0.3.8-property-only-startup

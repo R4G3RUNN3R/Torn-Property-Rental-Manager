@@ -1,8 +1,8 @@
 {
   "name": "torn-property-rental-manager",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "private": true,
-  "description": "Standalone Torn rental manager with automatic owned-property sync, manual per-property market scans, paced bulk updates, outlier-protected pricing, safe cancellation/relisting, and API pacing",
+  "description": "Standalone Torn rental manager with automatic owned-property sync, paginated per-property market scans, live page progress, paced bulk updates, outlier-protected pricing, safe cancellation/relisting, and API pacing",
   "scripts": {
     "build": "node scripts/build-userscript.js",
     "build:check": "node scripts/build-userscript.js --check",

@@ -2,11 +2,11 @@
 
 A standalone Torn.com userscript by **R4G3RUNN3R** for pricing and managing properties you own using Torn's rental market.
 
-## v0.3.8
+## v0.3.9
 
 The manager automatically loads and verifies **your owned properties** without scanning Torn's rental market. Market pricing is then requested deliberately, either for one property with **SCAN MARKET** or for all owned property types with **UPDATE ALL**.
 
-The pricing engine still compares only rental listings for the **same property type with the exact same upgrades/modifications**, normalizes every comparable to an equivalent **100-day total**, filters statistically extreme prices, and lets the user choose the cleaned market figure used as the pricing basis.
+The pricing engine compares only rental listings for the **same property type with the exact same upgrades/modifications**, normalizes every comparable to an equivalent **100-day total**, filters statistically extreme prices, and lets the user choose the cleaned market figure used as the pricing basis.
 
 `100-day equivalent = (listing total cost / listing rental period) * 100`
 
@@ -19,16 +19,26 @@ Available pricing bases:
 
 The configured undercut percentage is applied to the selected raw figure and the final proposed rent is rounded down to a whole dollar. The default remains **Average market price minus 0.5%**.
 
+### New in v0.3.9
+
+- Large rental markets no longer sit apparently frozen at **35%** while pagination runs invisibly.
+- Rental-market scans use Torn's reported total row count to calculate the required **100-row offset pages**.
+- Remaining pages are queued through the existing shared Torn API scheduler, so response waits can overlap without bypassing the **750 ms request-start spacing** or **80 requests per rolling minute** ceiling.
+- Individual **SCAN MARKET** actions show live page progress such as `page 2 / 7 • 200 / 643 listings` while the market is being collected.
+- The temporary page-progress display is removed when the market completes and normal property-card state takes over.
+- If Torn does not provide a usable total count, the scanner safely falls back to validated Torn continuation links.
+- The existing 100-page safety ceiling, API-key redaction, cache freshness, bounded retry, 60-second rate-limit cooldown, ownership verification and pricing safeguards remain unchanged.
+
 ### New in v0.3.8
 
 - **Owned properties load automatically.** The manager fetches the current API user identity and owned-property list when it starts/opens.
 - Automatic property discovery makes **zero rental-market requests**.
 - API-owner verification still rejects spouse-owned, other-player-owned and unverified-owner rows.
 - Every owned-property card is rendered even when there is no previous saved market snapshot.
-- Each property now has an explicit **SCAN MARKET** action. It refreshes that property's verified state and scans only the matching rental-market type.
+- Each property has an explicit **SCAN MARKET** action. It refreshes that property's verified state and scans only the matching rental-market type.
 - **UPDATE ALL remains manual** and is reserved for a deliberate bulk rental-market scan.
 - A legacy saved **Automatic page update** preference can no longer start UPDATE ALL automatically.
-- Settings explains the new split clearly: owned-property refresh is automatic; rental-market scanning is manual.
+- Settings explains the split clearly: owned-property refresh is automatic; rental-market scanning is manual.
 - Existing UPDATE ALL pacing, progress, pricing safeguards, cancellation safety and PREPARE RENTAL → LIST PROPERTY rules remain unchanged.
 
 ### New in v0.3.7
@@ -88,8 +98,9 @@ Press **SCAN MARKET** on a property card to:
 
 - refresh the verified owned-property state needed for that property
 - scan only that property's matching rental-market type
+- paginate the market in 100-row chunks when more than one page is required
+- show live page/listing progress while those chunks are being collected
 - update only that property's market snapshot and price calculation
-- show a progress bar on that property while the scan is running
 
 Other property cards keep their previous market snapshots until explicitly scanned.
 
@@ -163,7 +174,7 @@ Properties listed for rent remain in the bottom group. A property successfully l
 ### Updates
 
 - Owned-property list refresh: **automatic**
-- Individual rental-market pricing: **SCAN MARKET**
+- Individual rental-market pricing: **SCAN MARKET** with page-level progress for large markets
 - Bulk rental-market pricing: **UPDATE ALL**
 - No automatic market scanning on page load
 - UPDATE ALL scans unique property types sequentially with a visible global progress bar
@@ -207,6 +218,7 @@ Hard request controls:
 - maximum **80 request starts per rolling 60 seconds**
 - minimum **750 ms** between Torn API request starts
 - automatic owned-property sync makes **no rental-market request**
+- individual large-market pages are queued through the same shared request scheduler
 - UPDATE ALL processes unique property-type rental markets **sequentially**
 - UPDATE ALL waits **1.5 seconds between completed property-type scans**
 - no overlapping full update scan

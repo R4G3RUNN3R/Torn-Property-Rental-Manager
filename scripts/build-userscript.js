@@ -11,6 +11,7 @@ const sourceFiles = [
   'src/property-core.js',
   'src/market-core.js',
   'src/api-core.js',
+  'src/api-core-v039.js',
   'src/draft-core.js',
   'src/form-core.js',
   'src/app.js',
@@ -21,6 +22,7 @@ const sourceFiles = [
   'src/app-v036.js',
   'src/app-v037.js',
   'src/app-v038.js',
+  'src/app-v039.js',
   'src/bootstrap.js'
 ];
 
@@ -29,7 +31,7 @@ function metadata() {
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
 // @version      ${packageJson.version}
-// @description  Manage Torn rentals with automatic owned-property sync, manual per-property market scans, paced bulk updates, and safe native actions.
+// @description  Manage Torn rentals with automatic owned-property sync, live paginated market-scan progress, paced bulk updates, and safe native actions.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
 // @grant        GM_xmlhttpRequest

@@ -110,13 +110,15 @@ test('individual property progress visibly advances during rental pagination bef
   await new Promise(resolve => setTimeout(resolve, 0));
 
   const row = dom.window.document.querySelector('[data-property-id="101"]');
-  const bar = row && row.querySelector('[data-role="v035-update-progress"] [role="progressbar"]');
-  const label = row && row.querySelector('[data-role="v035-update-progress-label"]');
-  assert.ok(bar, 'individual market scan should keep a visible progress bar');
+  const pageProgress = row && row.querySelector('[data-role="v039-market-page-progress"]');
+  const bar = pageProgress && pageProgress.querySelector('[role="progressbar"]');
+  const label = pageProgress && pageProgress.querySelector('[data-role="v039-market-page-progress-label"]');
+  assert.ok(bar, 'individual market scan should show observer-safe page progress');
   const percent = Number(bar.getAttribute('aria-valuenow'));
   assert.ok(percent > 35 && percent < 92, `expected visible page progress between 35 and 92, saw ${percent}`);
   assert.match(label.textContent, /page\s+1\s*\/\s*4/i);
 
   releaseScan();
   await pending;
+  assert.equal(dom.window.document.querySelector('[data-role="v039-market-page-progress"]'), null);
 });

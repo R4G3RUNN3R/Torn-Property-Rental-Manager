@@ -33,12 +33,49 @@
     if (!Number.isInteger(id) || id <= 0) return false;
     const row = documentLike.querySelector(`[data-property-id="${id}"]`);
     if (!row) return false;
-    const progress = row.querySelector('[data-role="v035-update-progress"]');
-    if (!progress) return false;
-    const label = progress.querySelector('[data-role="v035-update-progress-label"]');
-    const track = progress.querySelector('[role="progressbar"]');
-    const fill = progress.querySelector('[data-role="v035-update-progress-fill"]');
+    const controls = row.querySelector('[data-role="v034-card-controls"]') || row;
+    const legacy = controls.querySelector('[data-role="v035-update-progress"]');
+    if (legacy) {
+      legacy.dataset.v039Hidden = '1';
+      legacy.style.display = 'none';
+    }
+
+    let progress = controls.querySelector('[data-role="v039-market-page-progress"]');
+    if (!progress) {
+      progress = documentLike.createElement('div');
+      progress.dataset.role = 'v039-market-page-progress';
+      progress.style.flexBasis = '100%';
+      progress.style.display = 'grid';
+      progress.style.gap = '4px';
+
+      const label = documentLike.createElement('small');
+      label.dataset.role = 'v039-market-page-progress-label';
+
+      const track = documentLike.createElement('div');
+      track.setAttribute('role', 'progressbar');
+      track.setAttribute('aria-label', 'Rental market page progress');
+      track.setAttribute('aria-valuemin', '0');
+      track.setAttribute('aria-valuemax', '100');
+      track.style.height = '7px';
+      track.style.border = '1px solid currentColor';
+      track.style.borderRadius = '999px';
+      track.style.overflow = 'hidden';
+      track.style.opacity = '0.85';
+
+      const fill = documentLike.createElement('div');
+      fill.dataset.role = 'v039-market-page-progress-fill';
+      fill.style.height = '100%';
+      fill.style.background = 'currentColor';
+      fill.style.transition = 'width 120ms linear';
+      track.appendChild(fill);
+      progress.append(label, track);
+      controls.appendChild(progress);
+    }
+
     const percent = pagePercent(entry);
+    const label = progress.querySelector('[data-role="v039-market-page-progress-label"]');
+    const track = progress.querySelector('[role="progressbar"]');
+    const fill = progress.querySelector('[data-role="v039-market-page-progress-fill"]');
     if (label) label.textContent = pageLabel(entry, percent);
     if (track) {
       track.setAttribute('aria-valuenow', String(Math.round(percent)));
@@ -48,6 +85,21 @@
     }
     if (fill) fill.style.width = `${percent}%`;
     return true;
+  }
+
+  function clearPageProgress(documentLike, propertyId) {
+    if (!documentLike || typeof documentLike.querySelector !== 'function') return;
+    const id = Number(propertyId);
+    if (!Number.isInteger(id) || id <= 0) return;
+    const row = documentLike.querySelector(`[data-property-id="${id}"]`);
+    if (!row) return;
+    const progress = row.querySelector('[data-role="v039-market-page-progress"]');
+    if (progress && progress.parentNode) progress.remove();
+    const legacy = row.querySelector('[data-role="v035-update-progress"][data-v039-hidden="1"]');
+    if (legacy) {
+      legacy.style.display = '';
+      delete legacy.dataset.v039Hidden;
+    }
   }
 
   function wrapApiClient(client, documentLike) {
@@ -60,11 +112,24 @@
         const originalPageProgress = typeof scanOptions.onPageProgress === 'function'
           ? scanOptions.onPageProgress
           : null;
+        const originalProgress = typeof scanOptions.onProgress === 'function'
+          ? scanOptions.onProgress
+          : null;
+
         scanOptions.onPageProgress = entry => {
           if (originalPageProgress) originalPageProgress(entry);
           if (propertyId > 0) renderPageProgress(documentLike, propertyId, entry);
         };
-        return client.scanMarkets(properties, scanOptions);
+        if (originalProgress) {
+          scanOptions.onProgress = entry => {
+            originalProgress(entry);
+            if (propertyId > 0) clearPageProgress(documentLike, propertyId);
+          };
+        }
+
+        const result = client.scanMarkets(properties, scanOptions);
+        if (!result || typeof result.finally !== 'function' || propertyId <= 0) return result;
+        return result.finally(() => clearPageProgress(documentLike, propertyId));
       }
     });
   }
@@ -87,6 +152,7 @@
     pagePercent,
     pageLabel,
     renderPageProgress,
+    clearPageProgress,
     wrapApiClient,
     createController
   }));

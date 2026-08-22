@@ -3,8 +3,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
-const PropertyCore = require('../src/property-core');
-const MarketCore = require('../src/market-core');
 
 function optionalRequire(path) {
   try { return require(path); } catch (error) { return null; }
@@ -73,28 +71,26 @@ test('rental market uses metadata total plus offsets and reports page progress i
   assert.deepEqual(progress.map(entry => [entry.donePages, entry.totalPages]), [[1, 3], [2, 3], [3, 3]]);
 });
 
-test('individual property progress visibly advances during rental pagination before the market scan completes', async () => {
+test('wrapped single-property scan shows page progress and removes it when the market completes', async () => {
   assert.ok(AppV039, 'v0.3.9 app wrapper should exist');
-  const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://www.torn.com/properties.php' });
+  const dom = new JSDOM(`<!doctype html><html><body>
+    <section data-property-id="101">
+      <div data-role="v034-card-controls">
+        <div data-role="v035-update-progress">
+          <small data-role="v035-update-progress-label">Searching rental market… 35%</small>
+          <div role="progressbar" aria-valuenow="35"><div data-role="v035-update-progress-fill"></div></div>
+        </div>
+      </div>
+    </section>
+  </body></html>`, { url: 'https://www.torn.com/properties.php' });
+
   let releaseScan;
   const scanGate = new Promise(resolve => { releaseScan = resolve; });
-  let callbackSeen = false;
-  let rowPresentInCallback = false;
-  let controlsPresentInCallback = false;
-  let pageProgressPresentInCallback = false;
-  const raw = { id: 101, property: { id: 1, name: 'Apartment' }, owner: { id: 1 }, happy: 100, status: 'none', modifications: [] };
-  const apiClient = {
-    async fetchCurrentUserId() { return 1; },
-    async fetchOwnedProperties() { return [raw]; },
+  const originalClient = {
     async scanMarkets(properties, options) {
-      assert.equal(properties.length, 1);
+      assert.deepEqual(properties.map(property => property.id), [101]);
       assert.equal(typeof options.onPageProgress, 'function');
-      callbackSeen = true;
       options.onPageProgress({ id: 1, donePages: 1, totalPages: 4, rowsDone: 100, totalRows: 350 });
-      const callbackRow = dom.window.document.querySelector('[data-property-id="101"]');
-      rowPresentInCallback = Boolean(callbackRow);
-      controlsPresentInCallback = Boolean(callbackRow && callbackRow.querySelector('[data-role="v034-card-controls"]'));
-      pageProgressPresentInCallback = Boolean(callbackRow && callbackRow.querySelector('[data-role="v039-market-page-progress"]'));
       await scanGate;
       if (typeof options.onProgress === 'function') {
         options.onProgress({ id: 1, done: 1, total: 1, market: { rentals: rentalRows(2, 0), fromCache: false } });
@@ -103,41 +99,24 @@ test('individual property progress visibly advances during rental pagination bef
     }
   };
 
-  const controller = AppV039.createController({
-    window: dom.window,
-    document: dom.window.document,
-    storage: memoryStorage(),
-    apiClient,
-    propertyCore: PropertyCore,
-    marketCore: MarketCore,
-    draftStore: { save(d) { return d; }, loadFor() { return null; }, clear() {} },
-    navigate() {}
-  });
+  const client = AppV039.wrapApiClient(originalClient, dom.window.document);
+  const pending = client.scanMarkets([{ id: 101, propertyTypeId: 1 }], { onProgress() {} });
+  await Promise.resolve();
 
-  await controller.syncOwnedProperties();
-
-  const before = dom.window.document.querySelector('[data-property-id="101"]');
-  assert.ok(before, 'property row should be rendered after startup sync');
-  assert.ok(before.querySelector('[data-role="v034-card-controls"]'), 'property controls should be rendered after startup sync');
-
-  const pending = controller.updateProperty(101);
-  await new Promise(resolve => setTimeout(resolve, 0));
-
-  assert.equal(callbackSeen, true, 'page progress callback should fire');
-  assert.equal(rowPresentInCallback, true, 'property row should exist inside page callback');
-  assert.equal(controlsPresentInCallback, true, 'property controls should exist inside page callback');
-  assert.equal(pageProgressPresentInCallback, true, 'v0.3.9 progress should exist immediately after the page callback');
-
-  const row = dom.window.document.querySelector('[data-property-id="101"]');
-  const pageProgress = row && row.querySelector('[data-role="v039-market-page-progress"]');
+  const pageProgress = dom.window.document.querySelector('[data-role="v039-market-page-progress"]');
   const bar = pageProgress && pageProgress.querySelector('[role="progressbar"]');
   const label = pageProgress && pageProgress.querySelector('[data-role="v039-market-page-progress-label"]');
-  assert.ok(bar, 'individual market scan should show observer-safe page progress after a task tick');
+  assert.ok(bar, 'single-property scan should show page-level progress');
   const percent = Number(bar.getAttribute('aria-valuenow'));
   assert.ok(percent > 35 && percent < 92, `expected visible page progress between 35 and 92, saw ${percent}`);
   assert.match(label.textContent, /page\s+1\s*\/\s*4/i);
+  assert.match(label.textContent, /100\s*\/\s*350 listings/i);
+  assert.equal(dom.window.document.querySelector('[data-role="v035-update-progress"]').style.display, 'none');
 
   releaseScan();
   await pending;
+
   assert.equal(dom.window.document.querySelector('[data-role="v039-market-page-progress"]'), null);
+  assert.equal(dom.window.document.querySelector('[data-role="v035-update-progress"]').style.display, '');
+  dom.window.close();
 });

@@ -12,10 +12,10 @@ function release() {
   return fs.readFileSync(releasePath, 'utf8');
 }
 
-test('release userscript has narrow Torn properties metadata and v0.3.7 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.3.8 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.3\.7/);
+  assert.match(source, /@version\s+0\.3\.8/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
@@ -107,19 +107,19 @@ test('release paces UPDATE ALL sequentially and renders a global progress bar', 
   assert.match(source, /Updating rental markets…/);
 });
 
-test('release defaults to manual updates with optional one-shot automatic page update', () => {
+test('release automatically syncs owned properties without automatically scanning rental markets', () => {
   const source = release();
-  assert.match(source, /autoPageUpdate:\s*false/);
-  assert.match(source, /Automatic page update/);
-  assert.match(source, /v035-update-mode-manual/);
-  assert.match(source, /v035-update-mode-automatic/);
+  assert.match(source, /function syncOwnedProperties\(\)/);
+  assert.match(source, /load:\s*syncOwnedProperties/);
+  assert.match(source, /fetchOwnedProperties\(\)/);
+  assert.match(source, /normalizeProperties\(rawProperties, currentUserId\)/);
+  assert.match(source, /Promise\.resolve\(\)\.then\(\(\) => syncOwnedProperties\(\)\)/);
+  assert.match(source, /Object\.assign\(\{\}, existing \|\| \{\}, \{ autoPageUpdate: false \}\)/);
+  assert.match(source, /SCAN MARKET/);
+  assert.match(source, /Rental-market scans are always manual/);
   assert.match(source, /v035-update-progress/);
-  assert.match(source, /function runInitialUpdate/);
-  assert.match(source, /runInitialUpdate\(controller\)/);
-  assert.doesNotMatch(source, /controller\.load\(\)\.then\(\(\) => \{\s*refreshRentalActions\(\)/);
   assert.match(source, /v034-update-property/);
   assert.match(source, /UPDATE ALL/);
-  assert.match(source, /Last updated:/);
 });
 
 test('release cancellation is explicit, native and fail-closed', () => {
@@ -161,6 +161,7 @@ test('build script declares every source module in deterministic order', () => {
     'src/app-v034.js',
     'src/app-v036.js',
     'src/app-v037.js',
+    'src/app-v038.js',
     'src/bootstrap.js'
   ];
   let last = -1;

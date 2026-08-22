@@ -3,10 +3,15 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
-const ApiCore = require('../src/api-core');
-const App = require('../src/app');
 const PropertyCore = require('../src/property-core');
 const MarketCore = require('../src/market-core');
+
+function optionalRequire(path) {
+  try { return require(path); } catch (error) { return null; }
+}
+
+const ApiCoreV039 = optionalRequire('../src/api-core-v039');
+const AppV039 = optionalRequire('../src/app-v039');
 
 function memoryStorage() {
   const map = new Map();
@@ -34,9 +39,10 @@ function rentalRows(count, offset) {
 }
 
 test('rental market uses metadata total plus offsets and reports page progress instead of sitting at 35 percent', async () => {
+  assert.ok(ApiCoreV039, 'v0.3.9 API core should exist');
   const urls = [];
   const progress = [];
-  const client = ApiCore.createClient({
+  const client = ApiCoreV039.createClient({
     apiKey: 'test-key',
     storage: memoryStorage(),
     scheduler: { run(task) { return task(); } },
@@ -67,9 +73,9 @@ test('rental market uses metadata total plus offsets and reports page progress i
   assert.deepEqual(progress.map(entry => [entry.donePages, entry.totalPages]), [[1, 3], [2, 3], [3, 3]]);
 });
 
-test('individual property progress advances during rental pagination before the market scan completes', async () => {
+test('individual property progress visibly advances during rental pagination before the market scan completes', async () => {
+  assert.ok(AppV039, 'v0.3.9 app wrapper should exist');
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://www.torn.com/properties.php' });
-  const seen = [];
   let releaseScan;
   const scanGate = new Promise(resolve => { releaseScan = resolve; });
   const raw = { id: 101, property: { id: 1, name: 'Apartment' }, owner: { id: 1 }, happy: 100, status: 'none', modifications: [] };
@@ -81,11 +87,14 @@ test('individual property progress advances during rental pagination before the 
       assert.equal(typeof options.onPageProgress, 'function');
       options.onPageProgress({ id: 1, donePages: 1, totalPages: 4, rowsDone: 100, totalRows: 350 });
       await scanGate;
+      if (typeof options.onProgress === 'function') {
+        options.onProgress({ id: 1, done: 1, total: 1, market: { rentals: rentalRows(2, 0), fromCache: false } });
+      }
       return { 1: { rentals: rentalRows(2, 0), fromCache: false } };
     }
   };
 
-  const controller = App.createController({
+  const controller = AppV039.createController({
     window: dom.window,
     document: dom.window.document,
     storage: memoryStorage(),
@@ -97,16 +106,16 @@ test('individual property progress advances during rental pagination before the 
   });
   controller.hydrate({ properties: PropertyCore.normalizeProperties([raw], 1), markets: {} });
 
-  const pending = controller.updateProperty(101, {
-    force: true,
-    silent: true,
-    onProgress(entry) { seen.push(entry); }
-  });
+  const pending = controller.updateProperty(101);
   await new Promise(resolve => setTimeout(resolve, 0));
 
-  const percentages = seen.map(entry => Number(entry.percent));
-  assert.ok(percentages.includes(35));
-  assert.ok(percentages.some(value => value > 35 && value < 92), `expected page progress between 35 and 92, saw ${percentages.join(', ')}`);
+  const row = dom.window.document.querySelector('[data-property-id="101"]');
+  const bar = row && row.querySelector('[data-role="v035-update-progress"] [role="progressbar"]');
+  const label = row && row.querySelector('[data-role="v035-update-progress-label"]');
+  assert.ok(bar, 'individual market scan should keep a visible progress bar');
+  const percent = Number(bar.getAttribute('aria-valuenow'));
+  assert.ok(percent > 35 && percent < 92, `expected visible page progress between 35 and 92, saw ${percent}`);
+  assert.match(label.textContent, /page\s+1\s*\/\s*4/i);
 
   releaseScan();
   await pending;

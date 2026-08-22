@@ -12,10 +12,10 @@ function release() {
   return fs.readFileSync(releasePath, 'utf8');
 }
 
-test('release userscript has narrow Torn properties metadata and v0.3.8 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.3.9 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.3\.8/);
+  assert.match(source, /@version\s+0\.3\.9/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
@@ -122,6 +122,19 @@ test('release automatically syncs owned properties without automatically scannin
   assert.match(source, /UPDATE ALL/);
 });
 
+test('release paginates large rental markets with total plus offset and exposes page-level progress', () => {
+  const source = release();
+  assert.match(source, /function metadataTotal/);
+  assert.match(source, /function offsetUrl/);
+  assert.match(source, /searchParams\.set\('limit', String\(PAGE_LIMIT\)\)/);
+  assert.match(source, /searchParams\.set\('offset'/);
+  assert.match(source, /Math\.ceil\(total \/ PAGE_LIMIT\)/);
+  assert.match(source, /onPageProgress/);
+  assert.match(source, /v039-market-page-progress/);
+  assert.match(source, /Searching rental market…/);
+  assert.match(source, /listings/);
+});
+
 test('release cancellation is explicit, native and fail-closed', () => {
   const source = release();
   assert.match(source, /function findRentalCancelButton/);
@@ -152,6 +165,7 @@ test('build script declares every source module in deterministic order', () => {
     'src/property-core.js',
     'src/market-core.js',
     'src/api-core.js',
+    'src/api-core-v039.js',
     'src/draft-core.js',
     'src/form-core.js',
     'src/app.js',
@@ -162,6 +176,7 @@ test('build script declares every source module in deterministic order', () => {
     'src/app-v036.js',
     'src/app-v037.js',
     'src/app-v038.js',
+    'src/app-v039.js',
     'src/bootstrap.js'
   ];
   let last = -1;

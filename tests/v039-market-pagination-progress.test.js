@@ -113,12 +113,12 @@ test('individual property progress visibly advances during rental pagination bef
     draftStore: { save(d) { return d; }, loadFor() { return null; }, clear() {} },
     navigate() {}
   });
-  controller.hydrate({ properties: PropertyCore.normalizeProperties([raw], 1), markets: {} });
-  controller.render();
+
+  await controller.syncOwnedProperties();
 
   const before = dom.window.document.querySelector('[data-property-id="101"]');
-  assert.ok(before, 'property row should be rendered before the scan starts');
-  assert.ok(before.querySelector('[data-role="v034-card-controls"]'), 'property controls should be rendered before the scan starts');
+  assert.ok(before, 'property row should be rendered after startup sync');
+  assert.ok(before.querySelector('[data-role="v034-card-controls"]'), 'property controls should be rendered after startup sync');
 
   const pending = controller.updateProperty(101);
   await new Promise(resolve => setTimeout(resolve, 0));

@@ -73,7 +73,8 @@
         const updateAll = panel.querySelector('[data-action="v034-update-all"]');
         if (updateAll) updateAll.title = 'Deliberately scan rental markets for all owned properties';
         const empty = panel.querySelector('[data-role="v034-empty-note"]');
-        if (empty) empty.textContent = 'Loading your owned properties automatically. Rental markets are scanned only when you choose SCAN MARKET or UPDATE ALL.';
+        const emptyText = 'Loading your owned properties automatically. Rental markets are scanned only when you choose SCAN MARKET or UPDATE ALL.';
+        if (empty && empty.textContent !== emptyText) empty.textContent = emptyText;
       }
 
       const settings = documentLike.getElementById('r4g3-prm-settings-window');
@@ -91,7 +92,8 @@
             note.style.opacity = '0.78';
             updates.appendChild(note);
           }
-          note.textContent = 'Owned properties refresh automatically when the manager opens. Rental-market scans are always manual: SCAN MARKET for one property, or UPDATE ALL for a deliberate bulk scan.';
+          const noteText = 'Owned properties refresh automatically when the manager opens. Rental-market scans are always manual: SCAN MARKET for one property, or UPDATE ALL for a deliberate bulk scan.';
+          if (note.textContent !== noteText) note.textContent = noteText;
           for (const child of updates.querySelectorAll('small')) {
             if (child !== note) child.style.display = 'none';
           }

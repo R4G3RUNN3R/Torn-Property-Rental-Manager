@@ -3,8 +3,9 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
-const App = require('../src/app-v037');
+const App = require('../src/app-v038');
 const Bootstrap = require('../src/bootstrap');
+const UpdateCore = require('../src/update-core-v034');
 const PropertyCore = require('../src/property-core');
 const MarketCore = require('../src/market-core');
 
@@ -25,13 +26,12 @@ function rawProperties() {
   ];
 }
 
-test('startup property sync loads only verified owned properties and never scans rental markets', async () => {
+function createController(storage, calls) {
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://www.torn.com/properties.php' });
-  const calls = { owner: 0, properties: 0, markets: 0 };
   const controller = App.createController({
     window: dom.window,
     document: dom.window.document,
-    storage: memoryStorage(),
+    storage,
     apiClient: {
       async fetchCurrentUserId() { calls.owner += 1; return 1; },
       async fetchOwnedProperties() { calls.properties += 1; return rawProperties(); },
@@ -42,6 +42,12 @@ test('startup property sync loads only verified owned properties and never scans
     draftStore: { save(d) { return d; }, loadFor() { return null; }, clear() {} },
     navigate() {}
   });
+  return { dom, controller };
+}
+
+test('startup property sync loads only verified owned properties and never scans rental markets', async () => {
+  const calls = { owner: 0, properties: 0, markets: 0 };
+  const { dom, controller } = createController(memoryStorage(), calls);
 
   assert.equal(typeof controller.syncOwnedProperties, 'function');
   await controller.syncOwnedProperties();
@@ -59,18 +65,27 @@ test('startup property sync loads only verified owned properties and never scans
   }
 });
 
-test('bootstrap startup always performs property-only sync and never automatic UPDATE ALL', async () => {
+test('legacy automatic-page-update preference cannot trigger an automatic rental-market scan', async () => {
   assert.equal(typeof Bootstrap.runInitialUpdate, 'function');
-  let propertySyncs = 0;
-  let marketScans = 0;
+  const storage = memoryStorage();
+  UpdateCore.saveSettings(storage, { autoPageUpdate: true });
+  const calls = { owner: 0, properties: 0, markets: 0 };
+  const { controller } = createController(storage, calls);
 
-  const controller = {
-    getUpdateSettings() { return { autoPageUpdate: true }; },
-    async syncOwnedProperties() { propertySyncs += 1; return { properties: [] }; },
-    async updateAll() { marketScans += 1; }
-  };
+  await controller.syncOwnedProperties();
+  assert.equal(controller.getUpdateSettings().autoPageUpdate, false);
+  assert.equal(await Bootstrap.runInitialUpdate(controller), false);
+  assert.deepEqual(calls, { owner: 1, properties: 1, markets: 0 });
+});
 
-  assert.equal(await Bootstrap.runInitialUpdate(controller), true);
-  assert.equal(propertySyncs, 1);
-  assert.equal(marketScans, 0);
+test('settings explain that owned properties are automatic and market scans are manual', () => {
+  const calls = { owner: 0, properties: 0, markets: 0 };
+  const { dom, controller } = createController(memoryStorage(), calls);
+  controller.openSettings();
+  const settings = dom.window.document.getElementById('r4g3-prm-settings-window');
+  const note = settings && settings.querySelector('[data-role="v038-update-help"]');
+  assert.ok(note);
+  assert.match(note.textContent, /owned properties refresh automatically/i);
+  assert.match(note.textContent, /SCAN MARKET/i);
+  assert.match(note.textContent, /UPDATE ALL/i);
 });

@@ -12,10 +12,10 @@ function release() {
   return fs.readFileSync(releasePath, 'utf8');
 }
 
-test('release userscript has narrow Torn properties metadata and v0.3.9 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.3.10 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.3\.9/);
+  assert.match(source, /@version\s+0\.3\.10/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
@@ -135,6 +135,23 @@ test('release paginates large rental markets with total plus offset and exposes 
   assert.match(source, /listings/);
 });
 
+test('release uses truthful cache-aware cancellable scans with retry diagnostics', () => {
+  const source = release();
+  assert.match(source, /PAGE_WORKERS\s*=\s*2/);
+  assert.match(source, /function sameRentalTimestamp/);
+  assert.match(source, /rentals_timestamp/);
+  assert.match(source, /unchanged:\s*true/);
+  assert.match(source, /Property checked:/);
+  assert.match(source, /Market checked:/);
+  assert.match(source, /propertyCheckedAt/);
+  assert.match(source, /marketCheckedAt/);
+  assert.match(source, /CANCEL SCAN/);
+  assert.match(source, /v0310-request-status/);
+  assert.match(source, /onRequestStatus/);
+  assert.match(source, /AbortError/);
+  assert.match(source, /requestHandle\.abort\(\)/);
+});
+
 test('release cancellation is explicit, native and fail-closed', () => {
   const source = release();
   assert.match(source, /function findRentalCancelButton/);
@@ -177,6 +194,7 @@ test('build script declares every source module in deterministic order', () => {
     'src/app-v037.js',
     'src/app-v038.js',
     'src/app-v039.js',
+    'src/app-v0310.js',
     'src/bootstrap.js'
   ];
   let last = -1;

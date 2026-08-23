@@ -56,12 +56,21 @@
     const propertyMarkets = value.propertyMarkets && typeof value.propertyMarkets === 'object' && !Array.isArray(value.propertyMarkets)
       ? value.propertyMarkets
       : {};
+    const legacyUpdated = normalizeTimestampMap(value.propertyUpdatedAt);
+    const propertyCheckedAt = Object.prototype.hasOwnProperty.call(value, 'propertyCheckedAt')
+      ? normalizeTimestampMap(value.propertyCheckedAt)
+      : Object.assign({}, legacyUpdated);
+    const marketCheckedAt = Object.prototype.hasOwnProperty.call(value, 'marketCheckedAt')
+      ? normalizeTimestampMap(value.marketCheckedAt)
+      : Object.assign({}, legacyUpdated);
     return {
       properties: value.properties,
       markets,
       propertyMarkets,
       updatedAt: timestamp(value.updatedAt),
-      propertyUpdatedAt: normalizeTimestampMap(value.propertyUpdatedAt)
+      propertyUpdatedAt: legacyUpdated,
+      propertyCheckedAt,
+      marketCheckedAt
     };
   }
 

@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
 
+const ApiCore = require('../src/api-core-v039');
 const Bootstrap = require('../src/bootstrap');
 const AppV0310 = require('../src/app-v0310');
 const PropertyCore = require('../src/property-core');
@@ -34,8 +35,10 @@ function draftStore() {
 }
 
 test('createApiFetch aborts the real GM request and rejects AbortError when its signal is cancelled', async () => {
-  const original = global.GM_xmlhttpRequest;
+  const originalRequest = global.GM_xmlhttpRequest;
+  const originalApiCore = global.R4G3ApiCore;
   let abortCalled = false;
+  global.R4G3ApiCore = ApiCore;
   global.GM_xmlhttpRequest = options => {
     const timer = setTimeout(() => {
       options.onload({ status: 200, responseText: '{}' });
@@ -60,8 +63,10 @@ test('createApiFetch aborts the real GM request and rejects AbortError when its 
     await assert.rejects(pending, error => error && error.name === 'AbortError');
     assert.equal(abortCalled, true);
   } finally {
-    if (original === undefined) delete global.GM_xmlhttpRequest;
-    else global.GM_xmlhttpRequest = original;
+    if (originalRequest === undefined) delete global.GM_xmlhttpRequest;
+    else global.GM_xmlhttpRequest = originalRequest;
+    if (originalApiCore === undefined) delete global.R4G3ApiCore;
+    else global.R4G3ApiCore = originalApiCore;
   }
 });
 

@@ -29,6 +29,15 @@
     return Boolean(error && error.name === 'AbortError');
   }
 
+  function requestStatusText(entry) {
+    const source = entry && typeof entry === 'object' ? entry : {};
+    const message = String(source.message || '').trim();
+    if (message) return message;
+    if (source.type === 'cooldown') return 'Torn rate limit detected; cooling down before retry.';
+    if (source.type === 'retry') return `Torn request failed; retrying attempt ${Number(source.attempt) || 1}.`;
+    return 'Torn request is being retried.';
+  }
+
   function createController(options) {
     const config = Object.assign({}, options || {});
     const windowLike = config.window;
@@ -51,9 +60,23 @@
           const source = Array.isArray(properties) ? properties : [];
           const propertyId = source.length === 1 ? Number(source[0] && source[0].id) : 0;
           const active = propertyId > 0 ? activeScans.get(propertyId) : null;
+          const originalRequestStatus = typeof scanOptions.onRequestStatus === 'function'
+            ? scanOptions.onRequestStatus
+            : null;
           if (active) {
             active.propertyChecked = true;
             if (active.controller && active.controller.signal) scanOptions.signal = active.controller.signal;
+            scanOptions.onRequestStatus = entry => {
+              if (originalRequestStatus) originalRequestStatus(entry);
+              active.requestStatus = {
+                type: String(entry && entry.type || ''),
+                message: requestStatusText(entry),
+                status: Number(entry && entry.status) || 0,
+                attempt: Number(entry && entry.attempt) || 0,
+                delayMs: Number(entry && entry.delayMs) || 0
+              };
+              enhanceUi();
+            };
           }
           return client.scanMarkets(properties, scanOptions);
         }
@@ -126,8 +149,10 @@
 
       const active = activeScans.get(Number(propertyId));
       let cancel = controls.querySelector('[data-action="v0310-cancel-scan"]');
+      let requestStatus = controls.querySelector('[data-role="v0310-request-status"]');
       if (!active) {
         if (cancel && cancel.parentNode) cancel.remove();
+        if (requestStatus && requestStatus.parentNode) requestStatus.remove();
         return;
       }
       if (!cancel) {
@@ -150,6 +175,21 @@
           if (current && current.controller && !current.controller.signal.aborted) current.controller.abort();
         });
         controls.appendChild(cancel);
+      }
+
+      if (active.requestStatus) {
+        if (!requestStatus) {
+          requestStatus = documentLike.createElement('small');
+          requestStatus.dataset.role = 'v0310-request-status';
+          requestStatus.style.flexBasis = '100%';
+          requestStatus.style.fontWeight = '700';
+          requestStatus.style.opacity = '0.9';
+          controls.appendChild(requestStatus);
+        }
+        const text = active.requestStatus.message || requestStatusText(active.requestStatus);
+        if (requestStatus.textContent !== text) requestStatus.textContent = text;
+      } else if (requestStatus && requestStatus.parentNode) {
+        requestStatus.remove();
       }
     }
 
@@ -226,7 +266,7 @@
 
       const AbortControllerCtor = windowLike.AbortController || (typeof AbortController !== 'undefined' ? AbortController : null);
       const controller = AbortControllerCtor ? new AbortControllerCtor() : null;
-      const active = { controller, propertyChecked: false };
+      const active = { controller, propertyChecked: false, requestStatus: null };
       activeScans.set(id, active);
       const previousState = baseController.getState();
       actionMessage = null;

@@ -13,6 +13,12 @@
     return url;
   }
 
+  function makeAbortError() {
+    const error = new Error('Torn API request cancelled');
+    error.name = 'AbortError';
+    return error;
+  }
+
   function createApiFetch(windowLike) {
     return function apiFetch(value, init) {
       let url;
@@ -23,16 +29,52 @@
       }
 
       const request = init || {};
+      const signal = request.signal || null;
+      if (signal && signal.aborted) return Promise.reject(makeAbortError());
+
       if (typeof GM_xmlhttpRequest === 'function') {
         return new Promise((resolve, reject) => {
-          GM_xmlhttpRequest({
+          let settled = false;
+          let requestHandle = null;
+          let abortListener = null;
+
+          function cleanup() {
+            if (signal && abortListener && typeof signal.removeEventListener === 'function') {
+              signal.removeEventListener('abort', abortListener);
+            }
+            abortListener = null;
+          }
+
+          function resolveOnce(valueToResolve) {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(valueToResolve);
+          }
+
+          function rejectOnce(error) {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(error);
+          }
+
+          abortListener = () => {
+            if (settled) return;
+            if (requestHandle && typeof requestHandle.abort === 'function') {
+              try { requestHandle.abort(); } catch (error) { /* Cancellation remains authoritative. */ }
+            }
+            rejectOnce(makeAbortError());
+          };
+
+          requestHandle = GM_xmlhttpRequest({
             method: request.method || 'GET',
             url: url.toString(),
             headers: request.headers || {},
             timeout: 30000,
             onload(response) {
               const status = Number(response.status) || 0;
-              resolve({
+              resolveOnce({
                 ok: status >= 200 && status < 300,
                 status,
                 async json() {
@@ -42,12 +84,20 @@
               });
             },
             ontimeout() {
-              reject(new Error('Torn API request timed out'));
+              rejectOnce(new Error('Torn API request timed out'));
             },
             onerror() {
-              reject(new Error('Torn API request failed'));
+              rejectOnce(new Error('Torn API request failed'));
+            },
+            onabort() {
+              rejectOnce(makeAbortError());
             }
           });
+
+          if (signal && typeof signal.addEventListener === 'function') {
+            signal.addEventListener('abort', abortListener, { once: true });
+            if (signal.aborted) abortListener();
+          }
         });
       }
 

@@ -14,6 +14,7 @@
   const FALLBACK_CACHE_MS = 15 * 60 * 1000;
   const RATE_LIMIT_COOLDOWN_MS = Number(baseApi.RATE_LIMIT_COOLDOWN_MS) || 60 * 1000;
   const PAGE_LIMIT = 100;
+  const PAGE_WORKERS = 2;
   const MAX_PAGES = 100;
   const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 
@@ -53,6 +54,20 @@
 
   function isRateLimited(response, body) {
     return Number(response && response.status) === 429 || apiErrorCode(body) === 5 || /too many requests/i.test(apiErrorDetail(body));
+  }
+
+  function abortError() {
+    const error = new Error('Scan cancelled');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  function isAbortError(error) {
+    return Boolean(error && error.name === 'AbortError');
+  }
+
+  function throwIfAborted(signal) {
+    if (signal && signal.aborted) throw abortError();
   }
 
   function rentalRows(body) {
@@ -131,27 +146,70 @@
       scheduler
     }));
 
-    async function requestJson(url, attempt) {
+    function emit(callback, entry) {
+      if (typeof callback !== 'function') return;
+      try { callback(entry); } catch (error) { /* Reporting must never break the request. */ }
+    }
+
+    async function wait(ms, signal) {
+      throwIfAborted(signal);
+      if (!signal || typeof signal.addEventListener !== 'function') {
+        await sleep(ms);
+        return;
+      }
+      let onAbort;
+      const aborted = new Promise((resolve, reject) => {
+        onAbort = () => reject(abortError());
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+      try {
+        await Promise.race([sleep(ms), aborted]);
+      } finally {
+        if (onAbort && typeof signal.removeEventListener === 'function') signal.removeEventListener('abort', onAbort);
+      }
+      throwIfAborted(signal);
+    }
+
+    async function requestJson(url, attempt, requestOptions) {
       const tryNumber = attempt || 0;
+      const options = requestOptions || {};
+      const signal = options.signal || null;
+      const onRequestStatus = typeof options.onRequestStatus === 'function' ? options.onRequestStatus : null;
       if (!apiKey) throw new Error('A Torn API key is required');
+      throwIfAborted(signal);
 
       let response;
       try {
-        response = await scheduler.run(() => fetchImpl(url, {
-          method: 'GET',
-          headers: {
-            Accept: 'application/json',
-            Authorization: `ApiKey ${apiKey}`
-          }
-        }));
+        response = await scheduler.run(() => {
+          throwIfAborted(signal);
+          return fetchImpl(url, {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              Authorization: `ApiKey ${apiKey}`
+            },
+            signal
+          });
+        });
       } catch (error) {
+        if (isAbortError(error) || signal && signal.aborted) throw abortError();
         if (tryNumber < 2) {
-          await sleep(250 * (tryNumber + 1));
-          return requestJson(url, tryNumber + 1);
+          const delayMs = 250 * (tryNumber + 1);
+          emit(onRequestStatus, {
+            type: 'retry',
+            attempt: tryNumber + 1,
+            maxAttempts: 3,
+            delayMs,
+            status: 0,
+            message: `Network request failed; retrying ${tryNumber + 1} / 2`
+          });
+          await wait(delayMs, signal);
+          return requestJson(url, tryNumber + 1, options);
         }
         throw new Error(redact(`Torn API network error: ${error && error.message || error}`, apiKey));
       }
 
+      throwIfAborted(signal);
       let body = null;
       try {
         body = await response.json();
@@ -161,8 +219,16 @@
 
       if (isRateLimited(response, body)) {
         if (tryNumber < 2) {
-          await sleep(RATE_LIMIT_COOLDOWN_MS);
-          return requestJson(url, tryNumber + 1);
+          emit(onRequestStatus, {
+            type: 'cooldown',
+            attempt: tryNumber + 1,
+            maxAttempts: 3,
+            delayMs: RATE_LIMIT_COOLDOWN_MS,
+            status: Number(response && response.status) || 429,
+            message: 'Torn rate limit detected; cooling down before retry'
+          });
+          await wait(RATE_LIMIT_COOLDOWN_MS, signal);
+          return requestJson(url, tryNumber + 1, options);
         }
         const detail = apiErrorDetail(body) || `HTTP ${response.status}`;
         throw new Error(redact(`Torn API rate limit: ${detail}`, apiKey));
@@ -170,8 +236,17 @@
 
       if (!response.ok) {
         if (TRANSIENT_STATUSES.has(Number(response.status)) && tryNumber < 2) {
-          await sleep(250 * (tryNumber + 1));
-          return requestJson(url, tryNumber + 1);
+          const delayMs = 250 * (tryNumber + 1);
+          emit(onRequestStatus, {
+            type: 'retry',
+            attempt: tryNumber + 1,
+            maxAttempts: 3,
+            delayMs,
+            status: Number(response.status) || 0,
+            message: `Torn API ${response.status}; retrying ${tryNumber + 1} / 2`
+          });
+          await wait(delayMs, signal);
+          return requestJson(url, tryNumber + 1, options);
         }
         const detail = apiErrorDetail(body) || `HTTP ${response.status}`;
         throw new Error(redact(`Torn API ${response.status}: ${detail}`, apiKey));
@@ -213,14 +288,35 @@
     }
 
     function emitPageProgress(callback, entry) {
-      if (typeof callback !== 'function') return;
-      try { callback(entry); } catch (error) { /* UI progress must never break a market request. */ }
+      emit(callback, entry);
     }
 
-    async function collectRentalPages(propertyTypeId, onPageProgress) {
-      const firstBody = await requestJson(offsetUrl(propertyTypeId, 0), 0);
+    function sameRentalTimestamp(cached, firstBody) {
+      if (!cached || !Array.isArray(cached.rentals) || !cached.rentals.length) return false;
+      const cachedTimestamp = Number(cached.rentals_timestamp);
+      const currentTimestamp = Number(firstBody && firstBody.rentals_timestamp);
+      return Number.isFinite(cachedTimestamp) && Number.isFinite(currentTimestamp) && cachedTimestamp === currentTimestamp;
+    }
+
+    async function collectRentalPages(propertyTypeId, scanOptions, cached) {
+      const options = scanOptions || {};
+      const onPageProgress = typeof options.onPageProgress === 'function' ? options.onPageProgress : null;
+      const firstBody = await requestJson(offsetUrl(propertyTypeId, 0), 0, options);
       const firstRows = rentalRows(firstBody);
       const total = metadataTotal(firstBody);
+
+      if (sameRentalTimestamp(cached, firstBody)) {
+        emitPageProgress(onPageProgress, {
+          id: Number(propertyTypeId),
+          donePages: 1,
+          totalPages: 1,
+          rowsDone: cached.rentals.length,
+          totalRows: total == null ? cached.rentals.length : total,
+          fromCache: true,
+          unchanged: true
+        });
+        return { rows: cached.rentals.slice(), firstBody, reused: true };
+      }
 
       if (total != null) {
         const totalPages = Math.max(1, Math.ceil(total / PAGE_LIMIT));
@@ -238,22 +334,34 @@
 
         const offsets = [];
         for (let offset = PAGE_LIMIT; offset < total; offset += PAGE_LIMIT) offsets.push(offset);
-        const remainingPages = await Promise.all(offsets.map(async offset => {
-          const body = await requestJson(offsetUrl(propertyTypeId, offset), 0);
-          const rows = rentalRows(body);
-          donePages += 1;
-          rowsDone += rows.length;
-          emitPageProgress(onPageProgress, {
-            id: Number(propertyTypeId),
-            donePages,
-            totalPages,
-            rowsDone: Math.min(rowsDone, total),
-            totalRows: total
-          });
-          return rows;
-        }));
+        const pageRows = new Array(offsets.length);
+        let cursor = 0;
 
-        return { rows: firstRows.concat(...remainingPages), firstBody };
+        async function worker() {
+          while (true) {
+            throwIfAborted(options.signal);
+            const index = cursor;
+            cursor += 1;
+            if (index >= offsets.length) return;
+            const offset = offsets[index];
+            const body = await requestJson(offsetUrl(propertyTypeId, offset), 0, options);
+            const rows = rentalRows(body);
+            pageRows[index] = rows;
+            donePages += 1;
+            rowsDone += rows.length;
+            emitPageProgress(onPageProgress, {
+              id: Number(propertyTypeId),
+              donePages,
+              totalPages,
+              rowsDone: Math.min(rowsDone, total),
+              totalRows: total
+            });
+          }
+        }
+
+        const workers = Math.min(PAGE_WORKERS, offsets.length);
+        if (workers > 0) await Promise.all(Array.from({ length: workers }, () => worker()));
+        return { rows: firstRows.concat(...pageRows), firstBody, reused: false };
       }
 
       const rows = firstRows.slice();
@@ -268,7 +376,8 @@
       });
 
       while (url && donePages < MAX_PAGES) {
-        const body = await requestJson(url, 0);
+        throwIfAborted(options.signal);
+        const body = await requestJson(url, 0, options);
         const pageRows = rentalRows(body);
         rows.push(...pageRows);
         donePages += 1;
@@ -282,7 +391,7 @@
         url = normalizeContinuation(nextLink(body));
       }
       if (url) throw new Error(`Torn API pagination exceeded ${MAX_PAGES} pages`);
-      return { rows, firstBody };
+      return { rows, firstBody, reused: false };
     }
 
     async function fetchRentalMarket(propertyTypeId, options) {
@@ -291,23 +400,33 @@
       const scanOptions = options || {};
       const force = Boolean(scanOptions.force);
       const onPageProgress = typeof scanOptions.onPageProgress === 'function' ? scanOptions.onPageProgress : null;
+      throwIfAborted(scanOptions.signal);
+      const cached = readCache(id);
 
-      if (!force) {
-        const cached = readCache(id);
-        if (cached && cacheIsFresh(cached)) {
-          emitPageProgress(onPageProgress, {
-            id,
-            donePages: 1,
-            totalPages: 1,
-            rowsDone: cached.rentals.length,
-            totalRows: cached.rentals.length,
-            fromCache: true
-          });
-          return Object.assign({}, cached, { fromCache: true });
-        }
+      if (!force && cached && cacheIsFresh(cached)) {
+        emitPageProgress(onPageProgress, {
+          id,
+          donePages: 1,
+          totalPages: 1,
+          rowsDone: cached.rentals.length,
+          totalRows: cached.rentals.length,
+          fromCache: true
+        });
+        return Object.assign({}, cached, { fromCache: true });
       }
 
-      const result = await collectRentalPages(id, onPageProgress);
+      const result = await collectRentalPages(id, scanOptions, cached);
+      const checkedAt = now();
+      if (result.reused && cached) {
+        const reused = Object.assign({}, cached, {
+          checkedAt,
+          fromCache: true,
+          unchanged: true
+        });
+        writeCache(id, reused);
+        return reused;
+      }
+
       const rentalRoot = result.firstBody && result.firstBody.rentals && typeof result.firstBody.rentals === 'object'
         ? result.firstBody.rentals
         : result.firstBody && result.firstBody.data && result.firstBody.data.rentals && typeof result.firstBody.data.rentals === 'object'
@@ -318,8 +437,10 @@
         property: rentalRoot && rentalRoot.property ? rentalRoot.property : null,
         rentals_timestamp: result.firstBody.rentals_timestamp == null ? null : result.firstBody.rentals_timestamp,
         rentals_delay: result.firstBody.rentals_delay == null ? null : result.firstBody.rentals_delay,
-        fetchedAt: now(),
-        fromCache: false
+        fetchedAt: checkedAt,
+        checkedAt,
+        fromCache: false,
+        unchanged: false
       };
       writeCache(id, market);
       return market;
@@ -339,17 +460,21 @@
       let done = 0;
 
       async function scanOne(id) {
+        throwIfAborted(scanOptions.signal);
         let market;
         try {
           market = await fetchRentalMarket(id, scanOptions);
         } catch (error) {
+          if (isAbortError(error) || scanOptions.signal && scanOptions.signal.aborted) throw abortError();
           market = {
             rentals: [],
             property: null,
             rentals_timestamp: null,
             rentals_delay: null,
             fetchedAt: now(),
+            checkedAt: null,
             fromCache: false,
+            unchanged: false,
             error: redact(error && error.message || error, apiKey)
           };
         }
@@ -364,7 +489,7 @@
       if (sequential) {
         for (let index = 0; index < ids.length; index += 1) {
           await scanOne(ids[index]);
-          if (betweenMarketsMs > 0 && index < ids.length - 1) await sleep(betweenMarketsMs);
+          if (betweenMarketsMs > 0 && index < ids.length - 1) await wait(betweenMarketsMs, scanOptions.signal);
         }
       } else {
         await Promise.all(ids.map(scanOne));
@@ -381,6 +506,7 @@
 
   return Object.freeze(Object.assign({}, baseApi, {
     PAGE_LIMIT,
+    PAGE_WORKERS,
     MAX_PAGES,
     metadataTotal,
     offsetUrl,

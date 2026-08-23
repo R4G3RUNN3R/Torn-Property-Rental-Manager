@@ -48,12 +48,20 @@
 
     function savePropertySnapshot(properties, markets, propertyMarkets) {
       const previous = updateCore.loadSnapshot(storage) || {};
+      const checkedAt = Date.now();
+      const propertyCheckedAt = Object.assign({}, previous.propertyCheckedAt || {});
+      for (const property of Array.isArray(properties) ? properties : []) {
+        const id = Number(property && property.id);
+        if (Number.isInteger(id) && id > 0) propertyCheckedAt[String(id)] = checkedAt;
+      }
       updateCore.saveSnapshot(storage, {
         properties,
         markets: markets || {},
         propertyMarkets: propertyMarkets || {},
         updatedAt: Number(previous.updatedAt) || 0,
-        propertyUpdatedAt: Object.assign({}, previous.propertyUpdatedAt || {})
+        propertyUpdatedAt: Object.assign({}, previous.propertyUpdatedAt || {}),
+        propertyCheckedAt,
+        marketCheckedAt: Object.assign({}, previous.marketCheckedAt || {})
       });
     }
 

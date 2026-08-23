@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
-// @version      0.3.9
-// @description  Manage Torn rentals with automatic owned-property sync, live paginated market-scan progress, paced bulk updates, and safe native actions.
+// @version      0.3.10
+// @description  Manage Torn rentals with truthful property/market timestamps, cache-aware cancellable scans, live diagnostics, and safe native actions.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
 // @grant        GM_xmlhttpRequest
@@ -888,6 +888,7 @@
   const FALLBACK_CACHE_MS = 15 * 60 * 1000;
   const RATE_LIMIT_COOLDOWN_MS = Number(baseApi.RATE_LIMIT_COOLDOWN_MS) || 60 * 1000;
   const PAGE_LIMIT = 100;
+  const PAGE_WORKERS = 2;
   const MAX_PAGES = 100;
   const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 
@@ -927,6 +928,20 @@
 
   function isRateLimited(response, body) {
     return Number(response && response.status) === 429 || apiErrorCode(body) === 5 || /too many requests/i.test(apiErrorDetail(body));
+  }
+
+  function abortError() {
+    const error = new Error('Scan cancelled');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  function isAbortError(error) {
+    return Boolean(error && error.name === 'AbortError');
+  }
+
+  function throwIfAborted(signal) {
+    if (signal && signal.aborted) throw abortError();
   }
 
   function rentalRows(body) {
@@ -1005,27 +1020,70 @@
       scheduler
     }));
 
-    async function requestJson(url, attempt) {
+    function emit(callback, entry) {
+      if (typeof callback !== 'function') return;
+      try { callback(entry); } catch (error) { /* Reporting must never break the request. */ }
+    }
+
+    async function wait(ms, signal) {
+      throwIfAborted(signal);
+      if (!signal || typeof signal.addEventListener !== 'function') {
+        await sleep(ms);
+        return;
+      }
+      let onAbort;
+      const aborted = new Promise((resolve, reject) => {
+        onAbort = () => reject(abortError());
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+      try {
+        await Promise.race([sleep(ms), aborted]);
+      } finally {
+        if (onAbort && typeof signal.removeEventListener === 'function') signal.removeEventListener('abort', onAbort);
+      }
+      throwIfAborted(signal);
+    }
+
+    async function requestJson(url, attempt, requestOptions) {
       const tryNumber = attempt || 0;
+      const options = requestOptions || {};
+      const signal = options.signal || null;
+      const onRequestStatus = typeof options.onRequestStatus === 'function' ? options.onRequestStatus : null;
       if (!apiKey) throw new Error('A Torn API key is required');
+      throwIfAborted(signal);
 
       let response;
       try {
-        response = await scheduler.run(() => fetchImpl(url, {
-          method: 'GET',
-          headers: {
-            Accept: 'application/json',
-            Authorization: `ApiKey ${apiKey}`
-          }
-        }));
+        response = await scheduler.run(() => {
+          throwIfAborted(signal);
+          return fetchImpl(url, {
+            method: 'GET',
+            headers: {
+              Accept: 'application/json',
+              Authorization: `ApiKey ${apiKey}`
+            },
+            signal
+          });
+        });
       } catch (error) {
+        if (isAbortError(error) || signal && signal.aborted) throw abortError();
         if (tryNumber < 2) {
-          await sleep(250 * (tryNumber + 1));
-          return requestJson(url, tryNumber + 1);
+          const delayMs = 250 * (tryNumber + 1);
+          emit(onRequestStatus, {
+            type: 'retry',
+            attempt: tryNumber + 1,
+            maxAttempts: 3,
+            delayMs,
+            status: 0,
+            message: `Network request failed; retrying ${tryNumber + 1} / 2`
+          });
+          await wait(delayMs, signal);
+          return requestJson(url, tryNumber + 1, options);
         }
         throw new Error(redact(`Torn API network error: ${error && error.message || error}`, apiKey));
       }
 
+      throwIfAborted(signal);
       let body = null;
       try {
         body = await response.json();
@@ -1035,8 +1093,16 @@
 
       if (isRateLimited(response, body)) {
         if (tryNumber < 2) {
-          await sleep(RATE_LIMIT_COOLDOWN_MS);
-          return requestJson(url, tryNumber + 1);
+          emit(onRequestStatus, {
+            type: 'cooldown',
+            attempt: tryNumber + 1,
+            maxAttempts: 3,
+            delayMs: RATE_LIMIT_COOLDOWN_MS,
+            status: Number(response && response.status) || 429,
+            message: 'Torn rate limit detected; cooling down before retry'
+          });
+          await wait(RATE_LIMIT_COOLDOWN_MS, signal);
+          return requestJson(url, tryNumber + 1, options);
         }
         const detail = apiErrorDetail(body) || `HTTP ${response.status}`;
         throw new Error(redact(`Torn API rate limit: ${detail}`, apiKey));
@@ -1044,8 +1110,17 @@
 
       if (!response.ok) {
         if (TRANSIENT_STATUSES.has(Number(response.status)) && tryNumber < 2) {
-          await sleep(250 * (tryNumber + 1));
-          return requestJson(url, tryNumber + 1);
+          const delayMs = 250 * (tryNumber + 1);
+          emit(onRequestStatus, {
+            type: 'retry',
+            attempt: tryNumber + 1,
+            maxAttempts: 3,
+            delayMs,
+            status: Number(response.status) || 0,
+            message: `Torn API ${response.status}; retrying ${tryNumber + 1} / 2`
+          });
+          await wait(delayMs, signal);
+          return requestJson(url, tryNumber + 1, options);
         }
         const detail = apiErrorDetail(body) || `HTTP ${response.status}`;
         throw new Error(redact(`Torn API ${response.status}: ${detail}`, apiKey));
@@ -1087,14 +1162,35 @@
     }
 
     function emitPageProgress(callback, entry) {
-      if (typeof callback !== 'function') return;
-      try { callback(entry); } catch (error) { /* UI progress must never break a market request. */ }
+      emit(callback, entry);
     }
 
-    async function collectRentalPages(propertyTypeId, onPageProgress) {
-      const firstBody = await requestJson(offsetUrl(propertyTypeId, 0), 0);
+    function sameRentalTimestamp(cached, firstBody) {
+      if (!cached || !Array.isArray(cached.rentals) || !cached.rentals.length) return false;
+      const cachedTimestamp = Number(cached.rentals_timestamp);
+      const currentTimestamp = Number(firstBody && firstBody.rentals_timestamp);
+      return Number.isFinite(cachedTimestamp) && Number.isFinite(currentTimestamp) && cachedTimestamp === currentTimestamp;
+    }
+
+    async function collectRentalPages(propertyTypeId, scanOptions, cached) {
+      const options = scanOptions || {};
+      const onPageProgress = typeof options.onPageProgress === 'function' ? options.onPageProgress : null;
+      const firstBody = await requestJson(offsetUrl(propertyTypeId, 0), 0, options);
       const firstRows = rentalRows(firstBody);
       const total = metadataTotal(firstBody);
+
+      if (sameRentalTimestamp(cached, firstBody)) {
+        emitPageProgress(onPageProgress, {
+          id: Number(propertyTypeId),
+          donePages: 1,
+          totalPages: 1,
+          rowsDone: cached.rentals.length,
+          totalRows: total == null ? cached.rentals.length : total,
+          fromCache: true,
+          unchanged: true
+        });
+        return { rows: cached.rentals.slice(), firstBody, reused: true };
+      }
 
       if (total != null) {
         const totalPages = Math.max(1, Math.ceil(total / PAGE_LIMIT));
@@ -1112,22 +1208,34 @@
 
         const offsets = [];
         for (let offset = PAGE_LIMIT; offset < total; offset += PAGE_LIMIT) offsets.push(offset);
-        const remainingPages = await Promise.all(offsets.map(async offset => {
-          const body = await requestJson(offsetUrl(propertyTypeId, offset), 0);
-          const rows = rentalRows(body);
-          donePages += 1;
-          rowsDone += rows.length;
-          emitPageProgress(onPageProgress, {
-            id: Number(propertyTypeId),
-            donePages,
-            totalPages,
-            rowsDone: Math.min(rowsDone, total),
-            totalRows: total
-          });
-          return rows;
-        }));
+        const pageRows = new Array(offsets.length);
+        let cursor = 0;
 
-        return { rows: firstRows.concat(...remainingPages), firstBody };
+        async function worker() {
+          while (true) {
+            throwIfAborted(options.signal);
+            const index = cursor;
+            cursor += 1;
+            if (index >= offsets.length) return;
+            const offset = offsets[index];
+            const body = await requestJson(offsetUrl(propertyTypeId, offset), 0, options);
+            const rows = rentalRows(body);
+            pageRows[index] = rows;
+            donePages += 1;
+            rowsDone += rows.length;
+            emitPageProgress(onPageProgress, {
+              id: Number(propertyTypeId),
+              donePages,
+              totalPages,
+              rowsDone: Math.min(rowsDone, total),
+              totalRows: total
+            });
+          }
+        }
+
+        const workers = Math.min(PAGE_WORKERS, offsets.length);
+        if (workers > 0) await Promise.all(Array.from({ length: workers }, () => worker()));
+        return { rows: firstRows.concat(...pageRows), firstBody, reused: false };
       }
 
       const rows = firstRows.slice();
@@ -1142,7 +1250,8 @@
       });
 
       while (url && donePages < MAX_PAGES) {
-        const body = await requestJson(url, 0);
+        throwIfAborted(options.signal);
+        const body = await requestJson(url, 0, options);
         const pageRows = rentalRows(body);
         rows.push(...pageRows);
         donePages += 1;
@@ -1156,7 +1265,7 @@
         url = normalizeContinuation(nextLink(body));
       }
       if (url) throw new Error(`Torn API pagination exceeded ${MAX_PAGES} pages`);
-      return { rows, firstBody };
+      return { rows, firstBody, reused: false };
     }
 
     async function fetchRentalMarket(propertyTypeId, options) {
@@ -1165,23 +1274,33 @@
       const scanOptions = options || {};
       const force = Boolean(scanOptions.force);
       const onPageProgress = typeof scanOptions.onPageProgress === 'function' ? scanOptions.onPageProgress : null;
+      throwIfAborted(scanOptions.signal);
+      const cached = readCache(id);
 
-      if (!force) {
-        const cached = readCache(id);
-        if (cached && cacheIsFresh(cached)) {
-          emitPageProgress(onPageProgress, {
-            id,
-            donePages: 1,
-            totalPages: 1,
-            rowsDone: cached.rentals.length,
-            totalRows: cached.rentals.length,
-            fromCache: true
-          });
-          return Object.assign({}, cached, { fromCache: true });
-        }
+      if (!force && cached && cacheIsFresh(cached)) {
+        emitPageProgress(onPageProgress, {
+          id,
+          donePages: 1,
+          totalPages: 1,
+          rowsDone: cached.rentals.length,
+          totalRows: cached.rentals.length,
+          fromCache: true
+        });
+        return Object.assign({}, cached, { fromCache: true });
       }
 
-      const result = await collectRentalPages(id, onPageProgress);
+      const result = await collectRentalPages(id, scanOptions, cached);
+      const checkedAt = now();
+      if (result.reused && cached) {
+        const reused = Object.assign({}, cached, {
+          checkedAt,
+          fromCache: true,
+          unchanged: true
+        });
+        writeCache(id, reused);
+        return reused;
+      }
+
       const rentalRoot = result.firstBody && result.firstBody.rentals && typeof result.firstBody.rentals === 'object'
         ? result.firstBody.rentals
         : result.firstBody && result.firstBody.data && result.firstBody.data.rentals && typeof result.firstBody.data.rentals === 'object'
@@ -1192,8 +1311,10 @@
         property: rentalRoot && rentalRoot.property ? rentalRoot.property : null,
         rentals_timestamp: result.firstBody.rentals_timestamp == null ? null : result.firstBody.rentals_timestamp,
         rentals_delay: result.firstBody.rentals_delay == null ? null : result.firstBody.rentals_delay,
-        fetchedAt: now(),
-        fromCache: false
+        fetchedAt: checkedAt,
+        checkedAt,
+        fromCache: false,
+        unchanged: false
       };
       writeCache(id, market);
       return market;
@@ -1213,17 +1334,21 @@
       let done = 0;
 
       async function scanOne(id) {
+        throwIfAborted(scanOptions.signal);
         let market;
         try {
           market = await fetchRentalMarket(id, scanOptions);
         } catch (error) {
+          if (isAbortError(error) || scanOptions.signal && scanOptions.signal.aborted) throw abortError();
           market = {
             rentals: [],
             property: null,
             rentals_timestamp: null,
             rentals_delay: null,
             fetchedAt: now(),
+            checkedAt: null,
             fromCache: false,
+            unchanged: false,
             error: redact(error && error.message || error, apiKey)
           };
         }
@@ -1238,7 +1363,7 @@
       if (sequential) {
         for (let index = 0; index < ids.length; index += 1) {
           await scanOne(ids[index]);
-          if (betweenMarketsMs > 0 && index < ids.length - 1) await sleep(betweenMarketsMs);
+          if (betweenMarketsMs > 0 && index < ids.length - 1) await wait(betweenMarketsMs, scanOptions.signal);
         }
       } else {
         await Promise.all(ids.map(scanOne));
@@ -1255,6 +1380,7 @@
 
   return Object.freeze(Object.assign({}, baseApi, {
     PAGE_LIMIT,
+    PAGE_WORKERS,
     MAX_PAGES,
     metadataTotal,
     offsetUrl,
@@ -3795,12 +3921,21 @@
     const propertyMarkets = value.propertyMarkets && typeof value.propertyMarkets === 'object' && !Array.isArray(value.propertyMarkets)
       ? value.propertyMarkets
       : {};
+    const legacyUpdated = normalizeTimestampMap(value.propertyUpdatedAt);
+    const propertyCheckedAt = Object.prototype.hasOwnProperty.call(value, 'propertyCheckedAt')
+      ? normalizeTimestampMap(value.propertyCheckedAt)
+      : Object.assign({}, legacyUpdated);
+    const marketCheckedAt = Object.prototype.hasOwnProperty.call(value, 'marketCheckedAt')
+      ? normalizeTimestampMap(value.marketCheckedAt)
+      : Object.assign({}, legacyUpdated);
     return {
       properties: value.properties,
       markets,
       propertyMarkets,
       updatedAt: timestamp(value.updatedAt),
-      propertyUpdatedAt: normalizeTimestampMap(value.propertyUpdatedAt)
+      propertyUpdatedAt: legacyUpdated,
+      propertyCheckedAt,
+      marketCheckedAt
     };
   }
 
@@ -4824,12 +4959,20 @@
 
     function savePropertySnapshot(properties, markets, propertyMarkets) {
       const previous = updateCore.loadSnapshot(storage) || {};
+      const checkedAt = Date.now();
+      const propertyCheckedAt = Object.assign({}, previous.propertyCheckedAt || {});
+      for (const property of Array.isArray(properties) ? properties : []) {
+        const id = Number(property && property.id);
+        if (Number.isInteger(id) && id > 0) propertyCheckedAt[String(id)] = checkedAt;
+      }
       updateCore.saveSnapshot(storage, {
         properties,
         markets: markets || {},
         propertyMarkets: propertyMarkets || {},
         updatedAt: Number(previous.updatedAt) || 0,
-        propertyUpdatedAt: Object.assign({}, previous.propertyUpdatedAt || {})
+        propertyUpdatedAt: Object.assign({}, previous.propertyUpdatedAt || {}),
+        propertyCheckedAt,
+        marketCheckedAt: Object.assign({}, previous.marketCheckedAt || {})
       });
     }
 
@@ -5134,6 +5277,428 @@
   }));
 }));
 
+/* ===== src/app-v0310.js ===== */
+(function (root, factory) {
+  const baseApp = typeof module === 'object' && module.exports ? require('./app-v039') : root.R4G3PropertyRentalApp;
+  const updateCore = typeof module === 'object' && module.exports ? require('./update-core-v034') : root.R4G3UpdateCoreV034;
+  const api = factory(baseApp, updateCore);
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.R4G3PropertyRentalApp = api;
+}(typeof globalThis !== 'undefined' ? globalThis : this, function (baseApp, updateCore) {
+  'use strict';
+
+  if (!baseApp || !updateCore) throw new Error('v0.3.10 app dependencies are unavailable');
+
+  function timestampMap(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    return Object.assign({}, source);
+  }
+
+  function mergeTimestampMaps(a, b) {
+    const result = {};
+    for (const source of [a, b]) {
+      for (const [key, raw] of Object.entries(source && typeof source === 'object' ? source : {})) {
+        const value = Number(raw) || 0;
+        if (value > Number(result[key] || 0)) result[key] = value;
+      }
+    }
+    return result;
+  }
+
+  function isAbortError(error) {
+    return Boolean(error && error.name === 'AbortError');
+  }
+
+  function requestStatusText(entry) {
+    const source = entry && typeof entry === 'object' ? entry : {};
+    const message = String(source.message || '').trim();
+    if (message) return message;
+    if (source.type === 'cooldown') return 'Torn rate limit detected; cooling down before retry.';
+    if (source.type === 'retry') return `Torn request failed; retrying attempt ${Number(source.attempt) || 1}.`;
+    return 'Torn request is being retried.';
+  }
+
+  function createController(options) {
+    const config = Object.assign({}, options || {});
+    const windowLike = config.window;
+    const documentLike = config.document;
+    const storage = config.storage || windowLike && windowLike.localStorage;
+    if (!windowLike || !documentLike) throw new TypeError('window and document are required');
+
+    const activeScans = new Map();
+    let destroyed = false;
+    let observer = null;
+    let scheduled = false;
+    let lastUpdate = null;
+    let actionMessage = null;
+
+    function wrapClient(client) {
+      if (!client || typeof client.scanMarkets !== 'function') return client;
+      return Object.assign({}, client, {
+        scanMarkets(properties, options) {
+          const scanOptions = Object.assign({}, options || {});
+          const source = Array.isArray(properties) ? properties : [];
+          const propertyId = source.length === 1 ? Number(source[0] && source[0].id) : 0;
+          const active = propertyId > 0 ? activeScans.get(propertyId) : null;
+          const originalRequestStatus = typeof scanOptions.onRequestStatus === 'function'
+            ? scanOptions.onRequestStatus
+            : null;
+          if (active) {
+            active.propertyChecked = true;
+            if (active.controller && active.controller.signal) scanOptions.signal = active.controller.signal;
+            scanOptions.onRequestStatus = entry => {
+              if (originalRequestStatus) originalRequestStatus(entry);
+              active.requestStatus = {
+                type: String(entry && entry.type || ''),
+                message: requestStatusText(entry),
+                status: Number(entry && entry.status) || 0,
+                attempt: Number(entry && entry.attempt) || 0,
+                delayMs: Number(entry && entry.delayMs) || 0
+              };
+              enhanceUi();
+            };
+          }
+          return client.scanMarkets(properties, scanOptions);
+        }
+      });
+    }
+
+    if (config.apiClient) config.apiClient = wrapClient(config.apiClient);
+    if (typeof config.apiClientFactory === 'function') {
+      const factory = config.apiClientFactory;
+      config.apiClientFactory = apiKey => wrapClient(factory(apiKey));
+    }
+
+    const baseController = baseApp.createController(config);
+    const initialSnapshot = updateCore.loadSnapshot(storage) || {};
+    let propertyCheckedAt = timestampMap(initialSnapshot.propertyCheckedAt);
+    let marketCheckedAt = timestampMap(initialSnapshot.marketCheckedAt);
+
+    function refreshTimestampMaps() {
+      const snapshot = updateCore.loadSnapshot(storage);
+      if (!snapshot) return;
+      propertyCheckedAt = mergeTimestampMaps(propertyCheckedAt, snapshot.propertyCheckedAt);
+      marketCheckedAt = mergeTimestampMaps(marketCheckedAt, snapshot.marketCheckedAt);
+    }
+
+    function formattedTime(map, propertyId) {
+      const value = Number(map[String(propertyId)] || map[propertyId] || 0);
+      if (!value) return 'Never';
+      try {
+        return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      } catch (error) {
+        return new Date(value).toLocaleTimeString();
+      }
+    }
+
+    function stateWithMeta() {
+      const state = baseController.getState();
+      return Object.assign({}, state, {
+        actionMessage: actionMessage == null ? state.actionMessage : actionMessage,
+        lastUpdate: lastUpdate ? Object.assign({}, lastUpdate) : null
+      });
+    }
+
+    function saveSnapshot() {
+      const state = baseController.getState();
+      const previous = updateCore.loadSnapshot(storage) || {};
+      return updateCore.saveSnapshot(storage, {
+        properties: state.properties || [],
+        markets: state.markets || {},
+        propertyMarkets: state.propertyMarkets || {},
+        updatedAt: Number(previous.updatedAt) || 0,
+        propertyUpdatedAt: Object.assign({}, previous.propertyUpdatedAt || {}),
+        propertyCheckedAt,
+        marketCheckedAt
+      });
+    }
+
+    function ensureCardMeta(row, propertyId) {
+      const controls = row && row.querySelector && row.querySelector('[data-role="v034-card-controls"]');
+      if (!controls) return;
+      let updated = controls.querySelector('[data-role="v034-last-updated"]');
+      if (!updated) {
+        updated = documentLike.createElement('small');
+        updated.dataset.role = 'v034-last-updated';
+        updated.style.opacity = '0.72';
+        updated.style.marginRight = 'auto';
+        controls.prepend(updated);
+      }
+      const updatedText = `Property checked: ${formattedTime(propertyCheckedAt, propertyId)} · Market checked: ${formattedTime(marketCheckedAt, propertyId)}`;
+      if (updated.textContent !== updatedText) updated.textContent = updatedText;
+
+      const active = activeScans.get(Number(propertyId));
+      let cancel = controls.querySelector('[data-action="v0310-cancel-scan"]');
+      let requestStatus = controls.querySelector('[data-role="v0310-request-status"]');
+      if (!active) {
+        if (cancel && cancel.parentNode) cancel.remove();
+        if (requestStatus && requestStatus.parentNode) requestStatus.remove();
+        return;
+      }
+      if (!cancel) {
+        cancel = documentLike.createElement('button');
+        cancel.type = 'button';
+        cancel.dataset.action = 'v0310-cancel-scan';
+        cancel.dataset.propertyId = String(propertyId);
+        cancel.dataset.noDrag = 'true';
+        cancel.textContent = 'CANCEL SCAN';
+        cancel.style.cursor = 'pointer';
+        cancel.style.padding = '7px 10px';
+        cancel.style.borderRadius = '7px';
+        cancel.style.border = '1px solid currentColor';
+        cancel.style.background = 'transparent';
+        cancel.style.color = 'inherit';
+        cancel.addEventListener('click', event => {
+          event.preventDefault();
+          event.stopPropagation();
+          const current = activeScans.get(Number(propertyId));
+          if (current && current.controller && !current.controller.signal.aborted) current.controller.abort();
+        });
+        controls.appendChild(cancel);
+      }
+
+      if (active.requestStatus) {
+        if (!requestStatus) {
+          requestStatus = documentLike.createElement('small');
+          requestStatus.dataset.role = 'v0310-request-status';
+          requestStatus.style.flexBasis = '100%';
+          requestStatus.style.fontWeight = '700';
+          requestStatus.style.opacity = '0.9';
+          controls.appendChild(requestStatus);
+        }
+        const text = active.requestStatus.message || requestStatusText(active.requestStatus);
+        if (requestStatus.textContent !== text) requestStatus.textContent = text;
+      } else if (requestStatus && requestStatus.parentNode) {
+        requestStatus.remove();
+      }
+    }
+
+    function ensureActionNote(row, propertyId) {
+      let note = row.querySelector('[data-role="v0310-action-note"]');
+      const applies = lastUpdate && Number(lastUpdate.propertyId) === Number(propertyId) && actionMessage;
+      if (!applies) {
+        if (note && note.parentNode) note.remove();
+        return;
+      }
+      if (!note) {
+        note = documentLike.createElement('div');
+        note.dataset.role = 'v0310-action-note';
+        note.style.gridColumn = '1 / -1';
+        note.style.padding = '7px 9px';
+        note.style.border = '1px solid rgba(128,128,128,0.25)';
+        note.style.borderRadius = '7px';
+        note.style.fontWeight = lastUpdate.marketError ? '700' : '500';
+        const controls = row.querySelector('[data-role="v034-card-controls"]');
+        if (controls && controls.parentNode === row) row.insertBefore(note, controls);
+        else row.appendChild(note);
+      }
+      if (note.textContent !== actionMessage) note.textContent = actionMessage;
+    }
+
+    function enhanceUi() {
+      scheduled = false;
+      if (destroyed) return null;
+      refreshTimestampMaps();
+      const panel = documentLike.getElementById('r4g3-prm-panel');
+      if (!panel) return null;
+      for (const row of panel.querySelectorAll('[data-property-id]')) {
+        const id = Number(row.getAttribute('data-property-id'));
+        if (!id) continue;
+        ensureCardMeta(row, id);
+        ensureActionNote(row, id);
+      }
+      return panel;
+    }
+
+    function scheduleEnhance() {
+      if (scheduled || destroyed) return;
+      scheduled = true;
+      const schedule = typeof windowLike.queueMicrotask === 'function'
+        ? windowLike.queueMicrotask.bind(windowLike)
+        : callback => Promise.resolve().then(callback);
+      schedule(enhanceUi);
+    }
+
+    if (typeof windowLike.MutationObserver === 'function' && (documentLike.body || documentLike.documentElement)) {
+      observer = new windowLike.MutationObserver(() => scheduleEnhance());
+      observer.observe(documentLike.body || documentLike.documentElement, { childList: true, subtree: true });
+    }
+
+    function restorePropertyMarket(propertyId, previousState, currentState) {
+      const id = String(propertyId);
+      const previousMarkets = previousState && previousState.propertyMarkets || {};
+      const restored = Object.assign({}, currentState && currentState.propertyMarkets || {});
+      if (Object.prototype.hasOwnProperty.call(previousMarkets, id)) restored[id] = previousMarkets[id];
+      else if (Object.prototype.hasOwnProperty.call(previousMarkets, Number(propertyId))) restored[id] = previousMarkets[Number(propertyId)];
+      else delete restored[id];
+      baseController.hydrate({
+        properties: currentState && currentState.properties || [],
+        markets: currentState && currentState.markets || {},
+        propertyMarkets: restored
+      });
+      return baseController.getState();
+    }
+
+    async function updateProperty(propertyId, options) {
+      const id = Number(propertyId);
+      if (!Number.isInteger(id) || id <= 0) throw new TypeError('A positive property ID is required');
+      if (activeScans.has(id)) return false;
+
+      const AbortControllerCtor = windowLike.AbortController || (typeof AbortController !== 'undefined' ? AbortController : null);
+      const controller = AbortControllerCtor ? new AbortControllerCtor() : null;
+      const active = { controller, propertyChecked: false, requestStatus: null };
+      activeScans.set(id, active);
+      const previousState = baseController.getState();
+      actionMessage = null;
+      lastUpdate = null;
+
+      try {
+        const pending = baseController.updateProperty(id, options || {});
+        enhanceUi();
+        const result = await pending;
+        const selectedMarket = result && result.propertyMarkets && (
+          result.propertyMarkets[String(id)] || result.propertyMarkets[id]
+        );
+        const checkedAt = Date.now();
+        if (active.propertyChecked) propertyCheckedAt[String(id)] = checkedAt;
+
+        if (selectedMarket && selectedMarket.error) {
+          const restoredState = restorePropertyMarket(id, previousState, result);
+          lastUpdate = {
+            propertyId: id,
+            propertyChecked: active.propertyChecked,
+            marketChecked: false,
+            marketError: String(selectedMarket.error),
+            marketUnchanged: false,
+            cancelled: false
+          };
+          actionMessage = `Property ${id} checked; market scan failed: ${selectedMarket.error}`;
+          saveSnapshot();
+          enhanceUi();
+          return Object.assign({}, restoredState, {
+            actionMessage,
+            lastUpdate: Object.assign({}, lastUpdate)
+          });
+        }
+
+        marketCheckedAt[String(id)] = checkedAt;
+        lastUpdate = {
+          propertyId: id,
+          propertyChecked: active.propertyChecked,
+          marketChecked: true,
+          marketError: '',
+          marketUnchanged: Boolean(selectedMarket && selectedMarket.unchanged),
+          cancelled: false
+        };
+        actionMessage = lastUpdate.marketUnchanged
+          ? `Property ${id} checked; rental market unchanged.`
+          : `Property ${id} and rental market updated.`;
+        saveSnapshot();
+        enhanceUi();
+        return stateWithMeta();
+      } catch (error) {
+        if (isAbortError(error) || controller && controller.signal.aborted) {
+          const checkedAt = Date.now();
+          if (active.propertyChecked) propertyCheckedAt[String(id)] = checkedAt;
+          lastUpdate = {
+            propertyId: id,
+            propertyChecked: active.propertyChecked,
+            marketChecked: false,
+            marketError: '',
+            marketUnchanged: false,
+            cancelled: true
+          };
+          actionMessage = `Market scan cancelled for property ${id}.`;
+          saveSnapshot();
+          return false;
+        }
+        lastUpdate = {
+          propertyId: id,
+          propertyChecked: active.propertyChecked,
+          marketChecked: false,
+          marketError: String(error && error.message || error),
+          marketUnchanged: false,
+          cancelled: false
+        };
+        actionMessage = active.propertyChecked
+          ? `Property ${id} checked; market scan failed: ${lastUpdate.marketError}`
+          : `Property ${id} check failed: ${lastUpdate.marketError}`;
+        if (active.propertyChecked) {
+          propertyCheckedAt[String(id)] = Date.now();
+          saveSnapshot();
+        }
+        throw error;
+      } finally {
+        activeScans.delete(id);
+        enhanceUi();
+      }
+    }
+
+    async function updateAll(...args) {
+      actionMessage = null;
+      lastUpdate = null;
+      const result = await baseController.updateAll(...args);
+      const checkedAt = Date.now();
+      for (const property of result && result.properties || []) {
+        const id = Number(property && property.id);
+        if (!id) continue;
+        propertyCheckedAt[String(id)] = checkedAt;
+        const market = result.markets && result.markets[property.propertyTypeId];
+        if (market && !market.error) marketCheckedAt[String(id)] = checkedAt;
+      }
+      saveSnapshot();
+      enhanceUi();
+      return stateWithMeta();
+    }
+
+    function wrapSync(method, args) {
+      const result = baseController[method](...args);
+      enhanceUi();
+      return result;
+    }
+
+    async function wrapAsync(method, args) {
+      const result = await baseController[method](...args);
+      enhanceUi();
+      return result;
+    }
+
+    const controller = Object.assign({}, baseController, {
+      updateProperty,
+      updateAll,
+      hydrate(...args) { return wrapSync('hydrate', args); },
+      render(...args) { return wrapSync('render', args); },
+      open(...args) { return wrapSync('open', args); },
+      openSettings(...args) { return wrapSync('openSettings', args); },
+      syncOwnedProperties: typeof baseController.syncOwnedProperties === 'function'
+        ? (...args) => wrapAsync('syncOwnedProperties', args)
+        : undefined,
+      getState: stateWithMeta,
+      cancelScan(propertyId) {
+        const active = activeScans.get(Number(propertyId));
+        if (!active || !active.controller || active.controller.signal.aborted) return false;
+        active.controller.abort();
+        return true;
+      },
+      destroy() {
+        destroyed = true;
+        for (const active of activeScans.values()) {
+          if (active.controller && !active.controller.signal.aborted) active.controller.abort();
+        }
+        activeScans.clear();
+        if (observer) observer.disconnect();
+        observer = null;
+        return baseController.destroy();
+      }
+    });
+
+    enhanceUi();
+    return Object.freeze(controller);
+  }
+
+  return Object.freeze(Object.assign({}, baseApp, { createController }));
+}));
+
 /* ===== src/bootstrap.js ===== */
 (function (root, factory) {
   const api = factory(root);
@@ -5150,6 +5715,12 @@
     return url;
   }
 
+  function makeAbortError() {
+    const error = new Error('Torn API request cancelled');
+    error.name = 'AbortError';
+    return error;
+  }
+
   function createApiFetch(windowLike) {
     return function apiFetch(value, init) {
       let url;
@@ -5160,16 +5731,52 @@
       }
 
       const request = init || {};
+      const signal = request.signal || null;
+      if (signal && signal.aborted) return Promise.reject(makeAbortError());
+
       if (typeof GM_xmlhttpRequest === 'function') {
         return new Promise((resolve, reject) => {
-          GM_xmlhttpRequest({
+          let settled = false;
+          let requestHandle = null;
+          let abortListener = null;
+
+          function cleanup() {
+            if (signal && abortListener && typeof signal.removeEventListener === 'function') {
+              signal.removeEventListener('abort', abortListener);
+            }
+            abortListener = null;
+          }
+
+          function resolveOnce(valueToResolve) {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(valueToResolve);
+          }
+
+          function rejectOnce(error) {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(error);
+          }
+
+          abortListener = () => {
+            if (settled) return;
+            if (requestHandle && typeof requestHandle.abort === 'function') {
+              try { requestHandle.abort(); } catch (error) { /* Cancellation remains authoritative. */ }
+            }
+            rejectOnce(makeAbortError());
+          };
+
+          requestHandle = GM_xmlhttpRequest({
             method: request.method || 'GET',
             url: url.toString(),
             headers: request.headers || {},
             timeout: 30000,
             onload(response) {
               const status = Number(response.status) || 0;
-              resolve({
+              resolveOnce({
                 ok: status >= 200 && status < 300,
                 status,
                 async json() {
@@ -5179,12 +5786,20 @@
               });
             },
             ontimeout() {
-              reject(new Error('Torn API request timed out'));
+              rejectOnce(new Error('Torn API request timed out'));
             },
             onerror() {
-              reject(new Error('Torn API request failed'));
+              rejectOnce(new Error('Torn API request failed'));
+            },
+            onabort() {
+              rejectOnce(makeAbortError());
             }
           });
+
+          if (signal && typeof signal.addEventListener === 'function') {
+            signal.addEventListener('abort', abortListener, { once: true });
+            if (signal.aborted) abortListener();
+          }
         });
       }
 

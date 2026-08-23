@@ -14,6 +14,17 @@
     return Object.assign({}, source);
   }
 
+  function mergeTimestampMaps(a, b) {
+    const result = {};
+    for (const source of [a, b]) {
+      for (const [key, raw] of Object.entries(source && typeof source === 'object' ? source : {})) {
+        const value = Number(raw) || 0;
+        if (value > Number(result[key] || 0)) result[key] = value;
+      }
+    }
+    return result;
+  }
+
   function isAbortError(error) {
     return Boolean(error && error.name === 'AbortError');
   }
@@ -63,8 +74,8 @@
     function refreshTimestampMaps() {
       const snapshot = updateCore.loadSnapshot(storage);
       if (!snapshot) return;
-      propertyCheckedAt = Object.assign({}, snapshot.propertyCheckedAt || {}, propertyCheckedAt);
-      marketCheckedAt = Object.assign({}, snapshot.marketCheckedAt || {}, marketCheckedAt);
+      propertyCheckedAt = mergeTimestampMaps(propertyCheckedAt, snapshot.propertyCheckedAt);
+      marketCheckedAt = mergeTimestampMaps(marketCheckedAt, snapshot.marketCheckedAt);
     }
 
     function formattedTime(map, propertyId) {
@@ -99,11 +110,6 @@
       });
     }
 
-    function removeCancelButton(row) {
-      const button = row && row.querySelector && row.querySelector('[data-action="v0310-cancel-scan"]');
-      if (button && button.parentNode) button.remove();
-    }
-
     function ensureCardMeta(row, propertyId) {
       const controls = row && row.querySelector && row.querySelector('[data-role="v034-card-controls"]');
       if (!controls) return;
@@ -115,7 +121,8 @@
         updated.style.marginRight = 'auto';
         controls.prepend(updated);
       }
-      updated.textContent = `Property checked: ${formattedTime(propertyCheckedAt, propertyId)} · Market checked: ${formattedTime(marketCheckedAt, propertyId)}`;
+      const updatedText = `Property checked: ${formattedTime(propertyCheckedAt, propertyId)} · Market checked: ${formattedTime(marketCheckedAt, propertyId)}`;
+      if (updated.textContent !== updatedText) updated.textContent = updatedText;
 
       const active = activeScans.get(Number(propertyId));
       let cancel = controls.querySelector('[data-action="v0310-cancel-scan"]');
@@ -165,7 +172,7 @@
         if (controls && controls.parentNode === row) row.insertBefore(note, controls);
         else row.appendChild(note);
       }
-      note.textContent = actionMessage;
+      if (note.textContent !== actionMessage) note.textContent = actionMessage;
     }
 
     function enhanceUi() {
@@ -225,9 +232,8 @@
       actionMessage = null;
       lastUpdate = null;
 
-      let pending;
       try {
-        pending = baseController.updateProperty(id, options || {});
+        const pending = baseController.updateProperty(id, options || {});
         enhanceUi();
         const result = await pending;
         const selectedMarket = result && result.propertyMarkets && (

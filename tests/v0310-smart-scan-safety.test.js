@@ -4,9 +4,12 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { JSDOM } = require('jsdom');
 
+function optionalRequire(path) {
+  try { return require(path); } catch (error) { return null; }
+}
+
 const ApiCore = require('../src/api-core-v039');
-const App = require('../src/app');
-const AppV034 = require('../src/app-v034');
+const AppV0310 = optionalRequire('../src/app-v0310');
 const UpdateCore = require('../src/update-core-v034');
 const PropertyCore = require('../src/property-core');
 const MarketCore = require('../src/market-core');
@@ -190,6 +193,7 @@ test('an aborted market scan rejects as AbortError before starting another reque
 });
 
 test('single-property update reports property success separately from a failed market scan', async () => {
+  assert.ok(AppV0310, 'v0.3.10 app wrapper should exist');
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://www.torn.com/properties.php' });
   const property = normalizedProperty();
   const previousMarket = { rentals: rentalRows(2), rentals_timestamp: 100, fetchedAt: 100, checkedAt: 100 };
@@ -200,7 +204,7 @@ test('single-property update reports property success separately from a failed m
       return { 1: { rentals: [], error: 'Torn API request timed out', fetchedAt: 200, fromCache: false } };
     }
   };
-  const controller = App.createController({
+  const controller = AppV0310.createController({
     window: dom.window,
     document: dom.window.document,
     storage: memoryStorage(),
@@ -218,6 +222,7 @@ test('single-property update reports property success separately from a failed m
   assert.match(state.lastUpdate.marketError, /timed out/i);
   assert.match(state.actionMessage, /market scan failed/i);
   assert.equal(state.propertyMarkets['101'], previousMarket, 'last good market snapshot must survive a failed scan');
+  controller.destroy();
   dom.window.close();
 });
 
@@ -235,6 +240,7 @@ test('snapshot metadata stores property-checked and market-checked timestamps in
 });
 
 test('property cards show separate property and market timestamps instead of one ambiguous Last updated value', () => {
+  assert.ok(AppV0310, 'v0.3.10 app wrapper should exist');
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://www.torn.com/properties.php' });
   const property = normalizedProperty();
   const storage = memoryStorage({
@@ -251,7 +257,7 @@ test('property cards show separate property and market timestamps instead of one
     async scanMarkets() { return {}; }
   };
 
-  const controller = AppV034.createController({
+  const controller = AppV0310.createController({
     window: dom.window,
     document: dom.window.document,
     storage,
@@ -271,6 +277,7 @@ test('property cards show separate property and market timestamps instead of one
 });
 
 test('an in-flight per-property scan exposes CANCEL SCAN and aborts without recording a successful market update', async () => {
+  assert.ok(AppV0310, 'v0.3.10 app wrapper should exist');
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://www.torn.com/properties.php' });
   const property = normalizedProperty();
   let receivedSignal = null;
@@ -292,7 +299,7 @@ test('an in-flight per-property scan exposes CANCEL SCAN and aborts without reco
       });
     }
   };
-  const controller = AppV034.createController({
+  const controller = AppV0310.createController({
     window: dom.window,
     document: dom.window.document,
     storage: memoryStorage(),

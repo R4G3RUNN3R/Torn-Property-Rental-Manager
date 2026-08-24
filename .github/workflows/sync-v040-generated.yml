@@ -1,0 +1,46 @@
+name: sync-v040-generated
+
+on:
+  push:
+    branches:
+      - feature/v0.4.0-architecture
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout feature branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/v0.4.0-architecture
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.20.2'
+
+      - name: Sync lockfile metadata
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build userscript
+        run: npm run build
+
+      - name: Commit generated artifacts when changed
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json R4G3RUNN3R-Property-Rental-Manager.user.js
+          if git diff --cached --quiet; then
+            echo "Generated artifacts already current."
+            exit 0
+          fi
+          git commit -m "build: sync v0.4.0 generated release [skip ci]"
+          git push origin HEAD:feature/v0.4.0-architecture

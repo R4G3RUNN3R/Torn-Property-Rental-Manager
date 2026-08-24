@@ -98,6 +98,36 @@ test('UI observer multiplexer gives app layers one native MutationObserver', () 
   assert.ok(disconnectCalls >= 1);
 });
 
+test('UI observer multiplexer never narrows an observer that requested all attributes', () => {
+  assert.ok(UiObserver, 'ui-observer should exist');
+  const observedOptions = [];
+
+  class NativeMutationObserver {
+    constructor() {}
+    observe(target, options) { observedOptions.push(Object.assign({}, options)); }
+    disconnect() {}
+    takeRecords() { return []; }
+  }
+
+  const root = { contains() { return true; } };
+  const documentLike = { documentElement: root, body: root };
+  const windowLike = { MutationObserver: NativeMutationObserver };
+  const Observer = UiObserver.createWindowProxy(windowLike, documentLike).MutationObserver;
+  const allAttributes = new Observer(() => {});
+  const filteredAttributes = new Observer(() => {});
+
+  allAttributes.observe(root, { attributes: true, subtree: true });
+  filteredAttributes.observe(root, { attributes: true, subtree: true, attributeFilter: ['class'] });
+
+  const finalOptions = observedOptions[observedOptions.length - 1];
+  assert.equal(finalOptions.attributes, true);
+  assert.equal(Object.prototype.hasOwnProperty.call(finalOptions, 'attributeFilter'), false,
+    'one unfiltered virtual observer requires the native observer to receive every attribute');
+
+  allAttributes.disconnect();
+  filteredAttributes.disconnect();
+});
+
 test('stable v0.4.0 runtime boots the real controller stack with one app-level native observer', async () => {
   assert.ok(AppRuntime, 'stable app-runtime should exist');
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://www.torn.com/properties.php' });

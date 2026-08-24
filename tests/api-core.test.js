@@ -217,7 +217,7 @@ test('market scan preserves successful markets when another property type fails 
   assert.ok(progress.every(entry => entry.total === 3));
 });
 
-test('reuses fresh rental cache and force bypasses it', async () => {
+test('reuses fresh rental cache and force checks Torn before reusing an unchanged snapshot', async () => {
   let clock = 1_000_000;
   let fetches = 0;
   const storage = memoryStorage();
@@ -241,10 +241,12 @@ test('reuses fresh rental cache and force bypasses it', async () => {
   const cached = await client.fetchRentalMarket(13);
   const forced = await client.fetchRentalMarket(13, { force: true });
 
-  assert.equal(fetches, 2);
+  assert.equal(fetches, 2, 'force must make a live Torn check even when data is unchanged');
   assert.equal(first.rentals[0].id, 1);
   assert.equal(cached.rentals[0].id, 1);
-  assert.equal(forced.rentals[0].id, 2);
+  assert.equal(forced.rentals[0].id, 1, 'unchanged rentals_timestamp should reuse the complete prior snapshot');
+  assert.equal(forced.unchanged, true);
+  assert.equal(forced.fromCache, true);
 });
 
 test('redacts API key from thrown errors', async () => {

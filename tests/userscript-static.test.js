@@ -175,14 +175,13 @@ test('release enforces shared 80 per minute and 750ms Torn API pacing', () => {
   assert.match(source, /RATE_LIMIT_COOLDOWN_MS\s*=\s*60\s*\*\s*1000/);
 });
 
-test('build script declares every source module in deterministic order', () => {
+test('build script declares every shipped source module in deterministic order', () => {
   const buildPath = path.join(root, 'scripts', 'build-userscript.js');
   const source = fs.readFileSync(buildPath, 'utf8');
   const expected = [
     'src/property-core.js',
     'src/market-core.js',
     'src/api-core.js',
-    'src/api-core-v039.js',
     'src/draft-core.js',
     'src/form-core.js',
     'src/app.js',
@@ -203,4 +202,5 @@ test('build script declares every source module in deterministic order', () => {
     assert.ok(index > last, `${file} should appear in build order`);
     last = index;
   }
+  assert.doesNotMatch(source, /src\/api-core-v\d+/);
 });

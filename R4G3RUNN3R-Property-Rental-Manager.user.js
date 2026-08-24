@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         R4G3RUNN3R Property Rental Manager
 // @namespace    https://github.com/R4G3RUNN3R
-// @version      0.3.10
+// @version      0.4.0
 // @description  Manage Torn rentals with truthful property/market timestamps, cache-aware cancellable scans, live diagnostics, and safe native actions.
 // @author       R4G3RUNN3R
 // @match        https://www.torn.com/properties.php*
@@ -493,6 +493,9 @@
   const CACHE_PREFIX = 'r4g3_property_rental_manager.market.';
   const FALLBACK_CACHE_MS = 15 * 60 * 1000;
   const RATE_LIMIT_COOLDOWN_MS = 60 * 1000;
+  const PAGE_LIMIT = 100;
+  const PAGE_WORKERS = 2;
+  const MAX_PAGES = 100;
   const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
 
   function defaultSleep(ms) {
@@ -523,11 +526,8 @@
       while (true) {
         const current = now();
         prune(current);
-
         const gapWait = lastStartedAt == null ? 0 : Math.max(0, minGapMs - (current - lastStartedAt));
-        const capWait = starts.length >= maxPerMinute
-          ? Math.max(0, 60000 - (current - starts[0]))
-          : 0;
+        const capWait = starts.length >= maxPerMinute ? Math.max(0, 60000 - (current - starts[0])) : 0;
         const waitMs = Math.max(gapWait, capWait);
 
         if (waitMs <= 0) {
@@ -537,14 +537,12 @@
           lastStartedAt = startedAt;
           return startedAt;
         }
-
         await sleep(waitMs);
       }
     }
 
     function run(task) {
       if (typeof task !== 'function') return Promise.reject(new TypeError('Scheduler task must be a function'));
-
       let release;
       const previous = slotTail;
       slotTail = new Promise(resolve => { release = resolve; });
@@ -564,336 +562,6 @@
     }
 
     return Object.freeze({ run });
-  }
-
-  function safeStorage(storage) {
-    if (storage && typeof storage.getItem === 'function' && typeof storage.setItem === 'function') return storage;
-    const map = new Map();
-    return {
-      getItem(key) { return map.has(key) ? map.get(key) : null; },
-      setItem(key, value) { map.set(key, String(value)); },
-      removeItem(key) { map.delete(key); }
-    };
-  }
-
-  function redact(value, apiKey) {
-    let text = String(value == null ? '' : value);
-    if (apiKey) text = text.split(String(apiKey)).join('[REDACTED]');
-    return text;
-  }
-
-  function collection(body, key) {
-    if (Array.isArray(body)) return body;
-    if (body && Array.isArray(body[key])) return body[key];
-    if (body && body.data && Array.isArray(body.data[key])) return body.data[key];
-
-    if (key === 'rentals') {
-      if (body && body.rentals && Array.isArray(body.rentals.listings)) return body.rentals.listings;
-      if (body && body.data && body.data.rentals && Array.isArray(body.data.rentals.listings)) {
-        return body.data.rentals.listings;
-      }
-    }
-
-    return [];
-  }
-
-  function nextLink(body) {
-    if (!body || typeof body !== 'object') return null;
-    return (
-      body._metadata && body._metadata.links && body._metadata.links.next ||
-      body.metadata && body.metadata.links && body.metadata.links.next ||
-      body._metadata && body._metadata.next ||
-      body.metadata && body.metadata.next ||
-      null
-    );
-  }
-
-  function normalizeContinuation(next) {
-    if (!next) return null;
-    let url;
-    try {
-      url = new URL(String(next), API_ORIGIN);
-    } catch (error) {
-      throw new Error('Invalid Torn API continuation URL');
-    }
-    if (url.origin !== API_ORIGIN || !url.pathname.startsWith('/v2/')) {
-      throw new Error('Rejected non-Torn API continuation URL');
-    }
-    return url.toString();
-  }
-
-  function positiveInt(value) {
-    const number = Number(value);
-    return Number.isInteger(number) && number > 0 ? number : 0;
-  }
-
-  function apiErrorDetail(body) {
-    if (!body || !body.error) return '';
-    return body.error.error || body.error.message || JSON.stringify(body.error);
-  }
-
-  function apiErrorCode(body) {
-    return Number(body && body.error && body.error.code) || 0;
-  }
-
-  function isRateLimited(response, body) {
-    return Number(response && response.status) === 429 || apiErrorCode(body) === 5 || /too many requests/i.test(apiErrorDetail(body));
-  }
-
-  function createClient(options) {
-    const config = Object.assign({}, options || {});
-    const apiKey = String(config.apiKey || '').trim();
-    const fetchImpl = config.fetchImpl || (root && root.fetch ? root.fetch.bind(root) : null);
-    const now = config.now || (() => Date.now());
-    const sleep = config.sleep || defaultSleep;
-    const storage = safeStorage(config.storage || (root && root.localStorage));
-    const scheduler = config.scheduler || createScheduler({ now, sleep });
-    let currentUserIdPromise = null;
-
-    if (!fetchImpl) throw new Error('A fetch implementation is required');
-
-    async function requestJson(url, attempt) {
-      const tryNumber = attempt || 0;
-      if (!apiKey) throw new Error('A Torn API key is required');
-
-      let response;
-      try {
-        response = await scheduler.run(() => fetchImpl(url, {
-          method: 'GET',
-          headers: {
-            Accept: 'application/json',
-            Authorization: `ApiKey ${apiKey}`
-          }
-        }));
-      } catch (error) {
-        if (tryNumber < 2) {
-          await sleep(250 * (tryNumber + 1));
-          return requestJson(url, tryNumber + 1);
-        }
-        throw new Error(redact(`Torn API network error: ${error && error.message || error}`, apiKey));
-      }
-
-      let body = null;
-      try {
-        body = await response.json();
-      } catch (error) {
-        body = null;
-      }
-
-      if (isRateLimited(response, body)) {
-        if (tryNumber < 2) {
-          await sleep(RATE_LIMIT_COOLDOWN_MS);
-          return requestJson(url, tryNumber + 1);
-        }
-        const detail = apiErrorDetail(body) || `HTTP ${response.status}`;
-        throw new Error(redact(`Torn API rate limit: ${detail}`, apiKey));
-      }
-
-      if (!response.ok) {
-        if (TRANSIENT_STATUSES.has(Number(response.status)) && tryNumber < 2) {
-          await sleep(250 * (tryNumber + 1));
-          return requestJson(url, tryNumber + 1);
-        }
-        const detail = apiErrorDetail(body) || `HTTP ${response.status}`;
-        throw new Error(redact(`Torn API ${response.status}: ${detail}`, apiKey));
-      }
-
-      if (body && body.error) {
-        const detail = apiErrorDetail(body);
-        throw new Error(redact(`Torn API error: ${detail}`, apiKey));
-      }
-
-      return body || {};
-    }
-
-    async function collectPages(initialUrl, key) {
-      const rows = [];
-      let url = initialUrl;
-      let firstBody = null;
-
-      for (let page = 0; page < 100 && url; page += 1) {
-        const body = await requestJson(url, 0);
-        if (!firstBody) firstBody = body;
-        rows.push(...collection(body, key));
-        url = normalizeContinuation(nextLink(body));
-      }
-
-      if (url) throw new Error('Torn API pagination exceeded 100 pages');
-      return { rows, firstBody: firstBody || {} };
-    }
-
-    function readCache(propertyTypeId) {
-      try {
-        const raw = storage.getItem(`${CACHE_PREFIX}${propertyTypeId}`);
-        if (!raw) return null;
-        const cached = JSON.parse(raw);
-        if (!cached || !Array.isArray(cached.rentals) || !Number.isFinite(Number(cached.fetchedAt))) return null;
-        return cached;
-      } catch (error) {
-        return null;
-      }
-    }
-
-    function writeCache(propertyTypeId, value) {
-      try {
-        storage.setItem(`${CACHE_PREFIX}${propertyTypeId}`, JSON.stringify(value));
-      } catch (error) {
-        // Cache failure must not break market scanning.
-      }
-    }
-
-    function cacheIsFresh(cached) {
-      const delaySeconds = Number(cached.rentals_delay);
-      const ttl = Number.isFinite(delaySeconds) && delaySeconds > 0
-        ? delaySeconds * 1000
-        : FALLBACK_CACHE_MS;
-      return now() - Number(cached.fetchedAt) < ttl;
-    }
-
-    async function fetchCurrentUserId() {
-      if (!currentUserIdPromise) {
-        currentUserIdPromise = (async () => {
-          const body = await requestJson(`${API_BASE}/user/basic`, 0);
-          const profile = body && body.profile && typeof body.profile === 'object' ? body.profile : body;
-          const id = positiveInt(profile && (profile.id != null ? profile.id : profile.player_id));
-          if (!id) throw new Error('Torn API user/basic response did not contain a valid user id');
-          return id;
-        })().catch(error => {
-          currentUserIdPromise = null;
-          throw error;
-        });
-      }
-      return currentUserIdPromise;
-    }
-
-    async function fetchOwnedProperties() {
-      const result = await collectPages(`${API_BASE}/user/properties?filters=ownedByUser&limit=100`, 'properties');
-      return result.rows;
-    }
-
-    async function fetchRentalMarket(propertyTypeId, options) {
-      const id = positiveInt(propertyTypeId);
-      if (!id) throw new TypeError('A positive property type ID is required');
-      const force = Boolean(options && options.force);
-
-      if (!force) {
-        const cached = readCache(id);
-        if (cached && cacheIsFresh(cached)) {
-          return Object.assign({}, cached, { fromCache: true });
-        }
-      }
-
-      const result = await collectPages(`${API_BASE}/market/${id}/rentals?limit=100`, 'rentals');
-      const rentalRoot = result.firstBody && result.firstBody.rentals && typeof result.firstBody.rentals === 'object'
-        ? result.firstBody.rentals
-        : result.firstBody && result.firstBody.data && result.firstBody.data.rentals && typeof result.firstBody.data.rentals === 'object'
-          ? result.firstBody.data.rentals
-          : null;
-      const market = {
-        rentals: result.rows,
-        property: rentalRoot && rentalRoot.property ? rentalRoot.property : null,
-        rentals_timestamp: result.firstBody.rentals_timestamp == null ? null : result.firstBody.rentals_timestamp,
-        rentals_delay: result.firstBody.rentals_delay == null ? null : result.firstBody.rentals_delay,
-        fetchedAt: now(),
-        fromCache: false
-      };
-      writeCache(id, market);
-      return market;
-    }
-
-    async function scanMarkets(properties, options) {
-      const scanOptions = options || {};
-      const onProgress = typeof scanOptions.onProgress === 'function' ? scanOptions.onProgress : null;
-      const sequential = scanOptions.sequential === true;
-      const betweenMarketsMs = Math.max(0, Number(scanOptions.betweenMarketsMs) || 0);
-      const ids = [...new Set((Array.isArray(properties) ? properties : [])
-        .map(property => positiveInt(property && property.propertyTypeId))
-        .filter(Boolean))]
-        .sort((a, b) => a - b);
-
-      const markets = {};
-      let done = 0;
-
-      async function scanOne(id) {
-        let market;
-        try {
-          market = await fetchRentalMarket(id, scanOptions);
-        } catch (error) {
-          market = {
-            rentals: [],
-            property: null,
-            rentals_timestamp: null,
-            rentals_delay: null,
-            fetchedAt: now(),
-            fromCache: false,
-            error: redact(error && error.message || error, apiKey)
-          };
-        }
-
-        markets[id] = market;
-        done += 1;
-        if (onProgress) {
-          onProgress({
-            id,
-            done,
-            total: ids.length,
-            market
-          });
-        }
-      }
-
-      if (sequential) {
-        for (let index = 0; index < ids.length; index += 1) {
-          await scanOne(ids[index]);
-          if (betweenMarketsMs > 0 && index < ids.length - 1) await sleep(betweenMarketsMs);
-        }
-      } else {
-        await Promise.all(ids.map(scanOne));
-      }
-
-      return markets;
-    }
-
-    return Object.freeze({
-      fetchCurrentUserId,
-      fetchOwnedProperties,
-      fetchRentalMarket,
-      scanMarkets
-    });
-  }
-
-  return Object.freeze({
-    API_ORIGIN,
-    API_BASE,
-    RATE_LIMIT_COOLDOWN_MS,
-    createScheduler,
-    createClient
-  });
-}));
-
-/* ===== src/api-core-v039.js ===== */
-(function (root, factory) {
-  const baseApi = typeof module === 'object' && module.exports ? require('./api-core') : root.R4G3ApiCore;
-  const api = factory(root, baseApi);
-  if (typeof module === 'object' && module.exports) module.exports = api;
-  if (root) root.R4G3ApiCore = api;
-}(typeof globalThis !== 'undefined' ? globalThis : this, function (root, baseApi) {
-  'use strict';
-
-  if (!baseApi) throw new Error('v0.3.9 API dependency is unavailable');
-
-  const API_ORIGIN = baseApi.API_ORIGIN || 'https://api.torn.com';
-  const API_BASE = baseApi.API_BASE || `${API_ORIGIN}/v2`;
-  const CACHE_PREFIX = 'r4g3_property_rental_manager.market.';
-  const FALLBACK_CACHE_MS = 15 * 60 * 1000;
-  const RATE_LIMIT_COOLDOWN_MS = Number(baseApi.RATE_LIMIT_COOLDOWN_MS) || 60 * 1000;
-  const PAGE_LIMIT = 100;
-  const PAGE_WORKERS = 2;
-  const MAX_PAGES = 100;
-  const TRANSIENT_STATUSES = new Set([429, 502, 503, 504]);
-
-  function defaultSleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
   }
 
   function safeStorage(storage) {
@@ -942,6 +610,13 @@
 
   function throwIfAborted(signal) {
     if (signal && signal.aborted) throw abortError();
+  }
+
+  function collection(body, key) {
+    if (Array.isArray(body)) return body;
+    if (body && Array.isArray(body[key])) return body[key];
+    if (body && body.data && Array.isArray(body.data[key])) return body.data[key];
+    return [];
   }
 
   function rentalRows(body) {
@@ -1008,21 +683,14 @@
     const now = config.now || (() => Date.now());
     const sleep = config.sleep || defaultSleep;
     const storage = safeStorage(config.storage || (root && root.localStorage));
-    const scheduler = config.scheduler || baseApi.createScheduler({ now, sleep });
+    const scheduler = config.scheduler || createScheduler({ now, sleep });
+    let currentUserIdPromise = null;
 
     if (!fetchImpl) throw new Error('A fetch implementation is required');
 
-    const baseClient = baseApi.createClient(Object.assign({}, config, {
-      fetchImpl,
-      now,
-      sleep,
-      storage,
-      scheduler
-    }));
-
     function emit(callback, entry) {
       if (typeof callback !== 'function') return;
-      try { callback(entry); } catch (error) { /* Reporting must never break the request. */ }
+      try { callback(entry); } catch (error) { /* Reporting must never break requests. */ }
     }
 
     async function wait(ms, signal) {
@@ -1070,11 +738,7 @@
         if (tryNumber < 2) {
           const delayMs = 250 * (tryNumber + 1);
           emit(onRequestStatus, {
-            type: 'retry',
-            attempt: tryNumber + 1,
-            maxAttempts: 3,
-            delayMs,
-            status: 0,
+            type: 'retry', attempt: tryNumber + 1, maxAttempts: 3, delayMs, status: 0,
             message: `Network request failed; retrying ${tryNumber + 1} / 2`
           });
           await wait(delayMs, signal);
@@ -1085,20 +749,13 @@
 
       throwIfAborted(signal);
       let body = null;
-      try {
-        body = await response.json();
-      } catch (error) {
-        body = null;
-      }
+      try { body = await response.json(); } catch (error) { body = null; }
 
       if (isRateLimited(response, body)) {
         if (tryNumber < 2) {
           emit(onRequestStatus, {
-            type: 'cooldown',
-            attempt: tryNumber + 1,
-            maxAttempts: 3,
-            delayMs: RATE_LIMIT_COOLDOWN_MS,
-            status: Number(response && response.status) || 429,
+            type: 'cooldown', attempt: tryNumber + 1, maxAttempts: 3,
+            delayMs: RATE_LIMIT_COOLDOWN_MS, status: Number(response && response.status) || 429,
             message: 'Torn rate limit detected; cooling down before retry'
           });
           await wait(RATE_LIMIT_COOLDOWN_MS, signal);
@@ -1112,10 +769,7 @@
         if (TRANSIENT_STATUSES.has(Number(response.status)) && tryNumber < 2) {
           const delayMs = 250 * (tryNumber + 1);
           emit(onRequestStatus, {
-            type: 'retry',
-            attempt: tryNumber + 1,
-            maxAttempts: 3,
-            delayMs,
+            type: 'retry', attempt: tryNumber + 1, maxAttempts: 3, delayMs,
             status: Number(response.status) || 0,
             message: `Torn API ${response.status}; retrying ${tryNumber + 1} / 2`
           });
@@ -1126,11 +780,21 @@
         throw new Error(redact(`Torn API ${response.status}: ${detail}`, apiKey));
       }
 
-      if (body && body.error) {
-        throw new Error(redact(`Torn API error: ${apiErrorDetail(body)}`, apiKey));
-      }
-
+      if (body && body.error) throw new Error(redact(`Torn API error: ${apiErrorDetail(body)}`, apiKey));
       return body || {};
+    }
+
+    async function collectPages(initialUrl, key, requestOptions) {
+      const rows = [];
+      let url = initialUrl;
+      for (let page = 0; page < MAX_PAGES && url; page += 1) {
+        throwIfAborted(requestOptions && requestOptions.signal);
+        const body = await requestJson(url, 0, requestOptions);
+        rows.push(...collection(body, key));
+        url = normalizeContinuation(nextLink(body));
+      }
+      if (url) throw new Error(`Torn API pagination exceeded ${MAX_PAGES} pages`);
+      return rows;
     }
 
     function readCache(propertyTypeId) {
@@ -1146,23 +810,14 @@
     }
 
     function writeCache(propertyTypeId, value) {
-      try {
-        storage.setItem(`${CACHE_PREFIX}${propertyTypeId}`, JSON.stringify(value));
-      } catch (error) {
-        // Cache failure must not break market scanning.
-      }
+      try { storage.setItem(`${CACHE_PREFIX}${propertyTypeId}`, JSON.stringify(value)); }
+      catch (error) { /* Cache failure must not break scanning. */ }
     }
 
     function cacheIsFresh(cached) {
       const delaySeconds = Number(cached.rentals_delay);
-      const ttl = Number.isFinite(delaySeconds) && delaySeconds > 0
-        ? delaySeconds * 1000
-        : FALLBACK_CACHE_MS;
+      const ttl = Number.isFinite(delaySeconds) && delaySeconds > 0 ? delaySeconds * 1000 : FALLBACK_CACHE_MS;
       return now() - Number(cached.fetchedAt) < ttl;
-    }
-
-    function emitPageProgress(callback, entry) {
-      emit(callback, entry);
     }
 
     function sameRentalTimestamp(cached, firstBody) {
@@ -1170,6 +825,26 @@
       const cachedTimestamp = Number(cached.rentals_timestamp);
       const currentTimestamp = Number(firstBody && firstBody.rentals_timestamp);
       return Number.isFinite(cachedTimestamp) && Number.isFinite(currentTimestamp) && cachedTimestamp === currentTimestamp;
+    }
+
+    async function fetchCurrentUserId() {
+      if (!currentUserIdPromise) {
+        currentUserIdPromise = (async () => {
+          const body = await requestJson(`${API_BASE}/user/basic`, 0, {});
+          const profile = body && body.profile && typeof body.profile === 'object' ? body.profile : body;
+          const id = positiveInt(profile && (profile.id != null ? profile.id : profile.player_id));
+          if (!id) throw new Error('Torn API user/basic response did not contain a valid user id');
+          return id;
+        })().catch(error => {
+          currentUserIdPromise = null;
+          throw error;
+        });
+      }
+      return currentUserIdPromise;
+    }
+
+    async function fetchOwnedProperties(options) {
+      return collectPages(`${API_BASE}/user/properties?filters=ownedByUser&limit=100`, 'properties', options || {});
     }
 
     async function collectRentalPages(propertyTypeId, scanOptions, cached) {
@@ -1180,14 +855,10 @@
       const total = metadataTotal(firstBody);
 
       if (sameRentalTimestamp(cached, firstBody)) {
-        emitPageProgress(onPageProgress, {
-          id: Number(propertyTypeId),
-          donePages: 1,
-          totalPages: 1,
-          rowsDone: cached.rentals.length,
-          totalRows: total == null ? cached.rentals.length : total,
-          fromCache: true,
-          unchanged: true
+        emit(onPageProgress, {
+          id: Number(propertyTypeId), donePages: 1, totalPages: 1,
+          rowsDone: cached.rentals.length, totalRows: total == null ? cached.rentals.length : total,
+          fromCache: true, unchanged: true
         });
         return { rows: cached.rentals.slice(), firstBody, reused: true };
       }
@@ -1195,16 +866,9 @@
       if (total != null) {
         const totalPages = Math.max(1, Math.ceil(total / PAGE_LIMIT));
         if (totalPages > MAX_PAGES) throw new Error(`Torn API pagination exceeded ${MAX_PAGES} pages`);
-
         let donePages = 1;
         let rowsDone = firstRows.length;
-        emitPageProgress(onPageProgress, {
-          id: Number(propertyTypeId),
-          donePages,
-          totalPages,
-          rowsDone,
-          totalRows: total
-        });
+        emit(onPageProgress, { id: Number(propertyTypeId), donePages, totalPages, rowsDone, totalRows: total });
 
         const offsets = [];
         for (let offset = PAGE_LIMIT; offset < total; offset += PAGE_LIMIT) offsets.push(offset);
@@ -1217,18 +881,14 @@
             const index = cursor;
             cursor += 1;
             if (index >= offsets.length) return;
-            const offset = offsets[index];
-            const body = await requestJson(offsetUrl(propertyTypeId, offset), 0, options);
+            const body = await requestJson(offsetUrl(propertyTypeId, offsets[index]), 0, options);
             const rows = rentalRows(body);
             pageRows[index] = rows;
             donePages += 1;
             rowsDone += rows.length;
-            emitPageProgress(onPageProgress, {
-              id: Number(propertyTypeId),
-              donePages,
-              totalPages,
-              rowsDone: Math.min(rowsDone, total),
-              totalRows: total
+            emit(onPageProgress, {
+              id: Number(propertyTypeId), donePages, totalPages,
+              rowsDone: Math.min(rowsDone, total), totalRows: total
             });
           }
         }
@@ -1241,27 +901,13 @@
       const rows = firstRows.slice();
       let url = normalizeContinuation(nextLink(firstBody));
       let donePages = 1;
-      emitPageProgress(onPageProgress, {
-        id: Number(propertyTypeId),
-        donePages,
-        totalPages: null,
-        rowsDone: rows.length,
-        totalRows: null
-      });
-
+      emit(onPageProgress, { id: Number(propertyTypeId), donePages, totalPages: null, rowsDone: rows.length, totalRows: null });
       while (url && donePages < MAX_PAGES) {
         throwIfAborted(options.signal);
         const body = await requestJson(url, 0, options);
-        const pageRows = rentalRows(body);
-        rows.push(...pageRows);
+        rows.push(...rentalRows(body));
         donePages += 1;
-        emitPageProgress(onPageProgress, {
-          id: Number(propertyTypeId),
-          donePages,
-          totalPages: null,
-          rowsDone: rows.length,
-          totalRows: null
-        });
+        emit(onPageProgress, { id: Number(propertyTypeId), donePages, totalPages: null, rowsDone: rows.length, totalRows: null });
         url = normalizeContinuation(nextLink(body));
       }
       if (url) throw new Error(`Torn API pagination exceeded ${MAX_PAGES} pages`);
@@ -1278,13 +924,9 @@
       const cached = readCache(id);
 
       if (!force && cached && cacheIsFresh(cached)) {
-        emitPageProgress(onPageProgress, {
-          id,
-          donePages: 1,
-          totalPages: 1,
-          rowsDone: cached.rentals.length,
-          totalRows: cached.rentals.length,
-          fromCache: true
+        emit(onPageProgress, {
+          id, donePages: 1, totalPages: 1,
+          rowsDone: cached.rentals.length, totalRows: cached.rentals.length, fromCache: true
         });
         return Object.assign({}, cached, { fromCache: true });
       }
@@ -1292,11 +934,7 @@
       const result = await collectRentalPages(id, scanOptions, cached);
       const checkedAt = now();
       if (result.reused && cached) {
-        const reused = Object.assign({}, cached, {
-          checkedAt,
-          fromCache: true,
-          unchanged: true
-        });
+        const reused = Object.assign({}, cached, { checkedAt, fromCache: true, unchanged: true });
         writeCache(id, reused);
         return reused;
       }
@@ -1327,9 +965,7 @@
       const betweenMarketsMs = Math.max(0, Number(scanOptions.betweenMarketsMs) || 0);
       const ids = [...new Set((Array.isArray(properties) ? properties : [])
         .map(property => positiveInt(property && property.propertyTypeId))
-        .filter(Boolean))]
-        .sort((a, b) => a - b);
-
+        .filter(Boolean))].sort((a, b) => a - b);
       const markets = {};
       let done = 0;
 
@@ -1341,23 +977,14 @@
         } catch (error) {
           if (isAbortError(error) || scanOptions.signal && scanOptions.signal.aborted) throw abortError();
           market = {
-            rentals: [],
-            property: null,
-            rentals_timestamp: null,
-            rentals_delay: null,
-            fetchedAt: now(),
-            checkedAt: null,
-            fromCache: false,
-            unchanged: false,
+            rentals: [], property: null, rentals_timestamp: null, rentals_delay: null,
+            fetchedAt: now(), checkedAt: null, fromCache: false, unchanged: false,
             error: redact(error && error.message || error, apiKey)
           };
         }
-
         markets[id] = market;
         done += 1;
-        if (onProgress) {
-          onProgress({ id, done, total: ids.length, market });
-        }
+        emit(onProgress, { id, done, total: ids.length, market });
       }
 
       if (sequential) {
@@ -1368,24 +995,24 @@
       } else {
         await Promise.all(ids.map(scanOne));
       }
-
       return markets;
     }
 
-    return Object.freeze(Object.assign({}, baseClient, {
-      fetchRentalMarket,
-      scanMarkets
-    }));
+    return Object.freeze({ fetchCurrentUserId, fetchOwnedProperties, fetchRentalMarket, scanMarkets });
   }
 
-  return Object.freeze(Object.assign({}, baseApi, {
+  return Object.freeze({
+    API_ORIGIN,
+    API_BASE,
+    RATE_LIMIT_COOLDOWN_MS,
     PAGE_LIMIT,
     PAGE_WORKERS,
     MAX_PAGES,
     metadataTotal,
     offsetUrl,
+    createScheduler,
     createClient
-  }));
+  });
 }));
 
 /* ===== src/draft-core.js ===== */
@@ -1867,7 +1494,504 @@
   });
 }));
 
-/* ===== src/app.js ===== */
+/* ===== src/settings-core.js ===== */
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) {
+    root.R4G3SettingsCore = api;
+    // Temporary v0.4.0 migration alias. Older app layers still consume this global
+    // while they are consolidated into the stable controller/view modules.
+    root.R4G3UiCoreV033 = api;
+  }
+}(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+
+  const SETTINGS_KEY = 'r4g3_property_rental_manager.v033';
+  const PRICING_BASES = Object.freeze(['lowest', 'median', 'average', 'highest']);
+  const SORT_MODES = Object.freeze([
+    'recommended', 'name-asc', 'name-desc', 'rent-desc', 'rent-asc',
+    'happy-desc', 'happy-asc', 'id-asc'
+  ]);
+  const DEFAULT_SETTINGS = Object.freeze({
+    pricingBasis: 'average',
+    undercutPercent: 0.5,
+    sortMode: 'recommended',
+    theme: 'dark',
+    density: 'comfortable',
+    showImages: true,
+    marketDetail: 'full',
+    settingsGeometry: Object.freeze({ left: 78, top: 110, width: 520, height: 620 })
+  });
+
+  function finite(value, fallback) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function clamp(value, min, max, fallback) {
+    return Math.min(max, Math.max(min, finite(value, fallback)));
+  }
+
+  function normalizeGeometry(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    return {
+      left: Math.round(clamp(source.left, 0, 10000, DEFAULT_SETTINGS.settingsGeometry.left)),
+      top: Math.round(clamp(source.top, 0, 10000, DEFAULT_SETTINGS.settingsGeometry.top)),
+      width: Math.round(clamp(source.width, 360, 1200, DEFAULT_SETTINGS.settingsGeometry.width)),
+      height: Math.round(clamp(source.height, 360, 1600, DEFAULT_SETTINGS.settingsGeometry.height))
+    };
+  }
+
+  function normalizeSettings(value, legacyUndercut, legacyTheme) {
+    const source = value && typeof value === 'object' ? value : {};
+    const fallbackUndercut = clamp(legacyUndercut, 0, 25, DEFAULT_SETTINGS.undercutPercent);
+    const fallbackTheme = legacyTheme === 'light' ? 'light' : DEFAULT_SETTINGS.theme;
+    return {
+      pricingBasis: PRICING_BASES.includes(source.pricingBasis) ? source.pricingBasis : DEFAULT_SETTINGS.pricingBasis,
+      undercutPercent: clamp(source.undercutPercent, 0, 25, fallbackUndercut),
+      sortMode: SORT_MODES.includes(source.sortMode) ? source.sortMode : DEFAULT_SETTINGS.sortMode,
+      theme: source.theme === 'light' || source.theme === 'dark' ? source.theme : fallbackTheme,
+      density: source.density === 'compact' ? 'compact' : DEFAULT_SETTINGS.density,
+      showImages: source.showImages !== false,
+      marketDetail: source.marketDetail === 'compact' ? 'compact' : DEFAULT_SETTINGS.marketDetail,
+      settingsGeometry: normalizeGeometry(source.settingsGeometry)
+    };
+  }
+
+  function loadSettings(storage, legacyUndercut, legacyTheme) {
+    if (!storage || typeof storage.getItem !== 'function') {
+      return normalizeSettings({}, legacyUndercut, legacyTheme);
+    }
+    try {
+      const raw = storage.getItem(SETTINGS_KEY);
+      return normalizeSettings(raw ? JSON.parse(raw) : {}, legacyUndercut, legacyTheme);
+    } catch (error) {
+      return normalizeSettings({}, legacyUndercut, legacyTheme);
+    }
+  }
+
+  function saveSettings(storage, next, legacyUndercut, legacyTheme) {
+    const current = loadSettings(storage, legacyUndercut, legacyTheme);
+    const source = next && typeof next === 'object' ? next : {};
+    const merged = Object.assign({}, current, source, {
+      settingsGeometry: source.settingsGeometry || current.settingsGeometry
+    });
+    const normalized = normalizeSettings(merged, legacyUndercut, legacyTheme);
+    if (storage && typeof storage.setItem === 'function') {
+      storage.setItem(SETTINGS_KEY, JSON.stringify(normalized));
+    }
+    return normalized;
+  }
+
+  function pricingBasisLabel(value) {
+    const labels = {
+      lowest: 'Lowest market price',
+      median: 'Median market price',
+      average: 'Average market price',
+      highest: 'Highest market price'
+    };
+    return labels[PRICING_BASES.includes(value) ? value : 'average'];
+  }
+
+  function statusGroup(entry, justListed) {
+    const property = entry && entry.property || {};
+    const id = Number(property.id);
+    if (justListed && typeof justListed.has === 'function' && justListed.has(id)) return 3;
+    const status = String(property.status || '').toLowerCase();
+    if (status === 'for_rent') return 2;
+    if (status === 'none') return 0;
+    return 1;
+  }
+
+  function nullableNumber(value, fallback) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  }
+
+  function rowComparator(mode) {
+    return function compare(a, b) {
+      const ap = a && a.property || {};
+      const bp = b && b.property || {};
+      if (mode === 'name-desc') {
+        return String(bp.name || '').localeCompare(String(ap.name || '')) || Number(ap.id) - Number(bp.id);
+      }
+      if (mode === 'rent-desc') {
+        return nullableNumber(b && b.quote && b.quote.proposedTotal, -Infinity)
+          - nullableNumber(a && a.quote && a.quote.proposedTotal, -Infinity)
+          || String(ap.name || '').localeCompare(String(bp.name || ''))
+          || Number(ap.id) - Number(bp.id);
+      }
+      if (mode === 'rent-asc') {
+        return nullableNumber(a && a.quote && a.quote.proposedTotal, Infinity)
+          - nullableNumber(b && b.quote && b.quote.proposedTotal, Infinity)
+          || String(ap.name || '').localeCompare(String(bp.name || ''))
+          || Number(ap.id) - Number(bp.id);
+      }
+      if (mode === 'happy-desc') {
+        return nullableNumber(bp.happy, -Infinity) - nullableNumber(ap.happy, -Infinity)
+          || String(ap.name || '').localeCompare(String(bp.name || ''))
+          || Number(ap.id) - Number(bp.id);
+      }
+      if (mode === 'happy-asc') {
+        return nullableNumber(ap.happy, Infinity) - nullableNumber(bp.happy, Infinity)
+          || String(ap.name || '').localeCompare(String(bp.name || ''))
+          || Number(ap.id) - Number(bp.id);
+      }
+      if (mode === 'id-asc') return Number(ap.id) - Number(bp.id);
+      return String(ap.name || '').localeCompare(String(bp.name || '')) || Number(ap.id) - Number(bp.id);
+    };
+  }
+
+  function sortRows(rows, settings, justListed) {
+    const options = normalizeSettings(settings || {}, settings && settings.undercutPercent, settings && settings.theme);
+    const compareRows = rowComparator(options.sortMode);
+    return (Array.isArray(rows) ? rows : []).slice().sort((a, b) => {
+      const groupDifference = statusGroup(a, justListed) - statusGroup(b, justListed);
+      return groupDifference || compareRows(a, b);
+    });
+  }
+
+  function clampPanelPosition(geometry, viewport) {
+    const source = geometry && typeof geometry === 'object' ? geometry : {};
+    const view = viewport && typeof viewport === 'object' ? viewport : {};
+    const width = Math.max(1, finite(source.width, 360));
+    const height = Math.max(1, finite(source.height, 260));
+    const viewportWidth = Math.max(16, finite(view.width, width + 16));
+    const viewportHeight = Math.max(16, finite(view.height, height + 16));
+    const maxLeft = Math.max(8, viewportWidth - width - 8);
+    const maxTop = Math.max(8, viewportHeight - height - 8);
+    return {
+      left: Math.round(clamp(source.left, 8, maxLeft, 8)),
+      top: Math.round(clamp(source.top, 8, maxTop, 8))
+    };
+  }
+
+  return Object.freeze({
+    SETTINGS_KEY,
+    PRICING_BASES,
+    SORT_MODES,
+    DEFAULT_SETTINGS,
+    normalizeSettings,
+    loadSettings,
+    saveSettings,
+    pricingBasisLabel,
+    sortRows,
+    clampPanelPosition
+  });
+}));
+
+/* ===== src/update-core.js ===== */
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) {
+    root.R4G3UpdateCore = api;
+    // Temporary v0.4.0 migration alias for the legacy app layer.
+    root.R4G3UpdateCoreV034 = api;
+  }
+}(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+
+  const SETTINGS_KEY = 'r4g3_property_rental_manager.v034.updates';
+  const SNAPSHOT_KEY = 'r4g3_property_rental_manager.v034.snapshot';
+  const DEFAULT_SETTINGS = Object.freeze({ autoPageUpdate: false });
+
+  function normalizeSettings(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    return { autoPageUpdate: source.autoPageUpdate === true };
+  }
+
+  function loadSettings(storage) {
+    if (!storage || typeof storage.getItem !== 'function') return normalizeSettings({});
+    try {
+      const raw = storage.getItem(SETTINGS_KEY);
+      return normalizeSettings(raw ? JSON.parse(raw) : {});
+    } catch (error) {
+      return normalizeSettings({});
+    }
+  }
+
+  function saveSettings(storage, next) {
+    const normalized = normalizeSettings(Object.assign({}, loadSettings(storage), next || {}));
+    if (storage && typeof storage.setItem === 'function') {
+      storage.setItem(SETTINGS_KEY, JSON.stringify(normalized));
+    }
+    return normalized;
+  }
+
+  function timestamp(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
+  }
+
+  function normalizeTimestampMap(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    const result = {};
+    for (const [key, raw] of Object.entries(source)) {
+      const id = Number(key);
+      const time = timestamp(raw);
+      if (Number.isInteger(id) && id > 0 && time) result[String(id)] = time;
+    }
+    return result;
+  }
+
+  function normalizeSnapshot(value) {
+    if (!value || typeof value !== 'object' || !Array.isArray(value.properties)) return null;
+    const markets = value.markets && typeof value.markets === 'object' && !Array.isArray(value.markets)
+      ? value.markets
+      : {};
+    const propertyMarkets = value.propertyMarkets && typeof value.propertyMarkets === 'object' && !Array.isArray(value.propertyMarkets)
+      ? value.propertyMarkets
+      : {};
+    const legacyUpdated = normalizeTimestampMap(value.propertyUpdatedAt);
+    const propertyCheckedAt = Object.prototype.hasOwnProperty.call(value, 'propertyCheckedAt')
+      ? normalizeTimestampMap(value.propertyCheckedAt)
+      : Object.assign({}, legacyUpdated);
+    const marketCheckedAt = Object.prototype.hasOwnProperty.call(value, 'marketCheckedAt')
+      ? normalizeTimestampMap(value.marketCheckedAt)
+      : Object.assign({}, legacyUpdated);
+    return {
+      properties: value.properties,
+      markets,
+      propertyMarkets,
+      updatedAt: timestamp(value.updatedAt),
+      propertyUpdatedAt: legacyUpdated,
+      propertyCheckedAt,
+      marketCheckedAt
+    };
+  }
+
+  function loadSnapshot(storage) {
+    if (!storage || typeof storage.getItem !== 'function') return null;
+    try {
+      const raw = storage.getItem(SNAPSHOT_KEY);
+      return raw ? normalizeSnapshot(JSON.parse(raw)) : null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  function saveSnapshot(storage, next) {
+    const normalized = normalizeSnapshot(next);
+    if (!normalized) return null;
+    if (storage && typeof storage.setItem === 'function') {
+      try {
+        storage.setItem(SNAPSHOT_KEY, JSON.stringify(normalized));
+      } catch (error) {
+        return normalized;
+      }
+    }
+    return normalized;
+  }
+
+  return Object.freeze({
+    SETTINGS_KEY,
+    SNAPSHOT_KEY,
+    DEFAULT_SETTINGS,
+    normalizeSettings,
+    loadSettings,
+    saveSettings,
+    normalizeSnapshot,
+    loadSnapshot,
+    saveSnapshot
+  });
+}));
+
+/* ===== src/ui-observer.js ===== */
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.R4G3UiObserver = api;
+}(typeof globalThis !== 'undefined' ? globalThis : this, function () {
+  'use strict';
+
+  const hubs = typeof WeakMap === 'function' ? new WeakMap() : new Map();
+
+  function normalizeOptions(value) {
+    const source = value && typeof value === 'object' ? value : {};
+    return {
+      childList: source.childList === true,
+      attributes: source.attributes === true,
+      characterData: source.characterData === true,
+      subtree: source.subtree === true,
+      attributeOldValue: source.attributeOldValue === true,
+      characterDataOldValue: source.characterDataOldValue === true,
+      attributeFilter: Array.isArray(source.attributeFilter) ? source.attributeFilter.map(String) : null
+    };
+  }
+
+  function recordMatches(registration, record) {
+    if (!registration || !record) return false;
+    const options = registration.options;
+    if (record.type === 'childList' && !options.childList) return false;
+    if (record.type === 'attributes' && !options.attributes) return false;
+    if (record.type === 'characterData' && !options.characterData) return false;
+    if (record.type === 'attributes' && options.attributeFilter && options.attributeFilter.length) {
+      if (!options.attributeFilter.includes(String(record.attributeName || ''))) return false;
+    }
+
+    const target = registration.target;
+    if (record.target === target) return true;
+    if (!options.subtree || !target) return false;
+    if (typeof target.contains === 'function') {
+      try { return target.contains(record.target); } catch (error) { return false; }
+    }
+    return false;
+  }
+
+  function mergedNativeOptions(observers) {
+    const merged = {
+      childList: false,
+      attributes: false,
+      characterData: false,
+      subtree: true,
+      attributeOldValue: false,
+      characterDataOldValue: false
+    };
+    let attributeFilter = null;
+    let hasRegistration = false;
+
+    for (const observer of observers) {
+      for (const registration of observer._registrations.values()) {
+        hasRegistration = true;
+        const options = registration.options;
+        merged.childList = merged.childList || options.childList;
+        merged.attributes = merged.attributes || options.attributes;
+        merged.characterData = merged.characterData || options.characterData;
+        merged.attributeOldValue = merged.attributeOldValue || options.attributeOldValue;
+        merged.characterDataOldValue = merged.characterDataOldValue || options.characterDataOldValue;
+        if (options.attributeFilter && options.attributeFilter.length) {
+          if (attributeFilter === null) attributeFilter = new Set(options.attributeFilter);
+          else for (const name of options.attributeFilter) attributeFilter.add(name);
+        }
+      }
+    }
+
+    if (!hasRegistration) return null;
+    if (!merged.childList && !merged.attributes && !merged.characterData) merged.childList = true;
+    if (merged.attributes && attributeFilter && attributeFilter.size) merged.attributeFilter = [...attributeFilter];
+    return merged;
+  }
+
+  function createHub(windowLike, documentLike) {
+    if (!windowLike || !documentLike) throw new TypeError('window and document are required');
+    if (hubs.has(documentLike)) return hubs.get(documentLike);
+
+    const NativeMutationObserver = windowLike.MutationObserver;
+    const rootTarget = documentLike.documentElement || documentLike.body || null;
+    const observers = new Set();
+    let nativeObserver = null;
+
+    function dispatch(records) {
+      const source = Array.isArray(records) ? records : Array.from(records || []);
+      for (const observer of [...observers]) {
+        if (!observer._registrations.size) continue;
+        const matched = source.filter(record => {
+          for (const registration of observer._registrations.values()) {
+            if (recordMatches(registration, record)) return true;
+          }
+          return false;
+        });
+        if (!matched.length) continue;
+        try { observer._callback(matched, observer); } catch (error) {
+          const schedule = typeof windowLike.setTimeout === 'function' ? windowLike.setTimeout.bind(windowLike) : setTimeout;
+          schedule(() => { throw error; }, 0);
+        }
+      }
+    }
+
+    function reconfigure() {
+      const options = mergedNativeOptions(observers);
+      if (!options || !rootTarget || typeof NativeMutationObserver !== 'function') {
+        if (nativeObserver) nativeObserver.disconnect();
+        return;
+      }
+      if (!nativeObserver) nativeObserver = new NativeMutationObserver(dispatch);
+      else nativeObserver.disconnect();
+      nativeObserver.observe(rootTarget, options);
+    }
+
+    class MultiplexedMutationObserver {
+      constructor(callback) {
+        if (typeof callback !== 'function') throw new TypeError('MutationObserver callback must be a function');
+        this._callback = callback;
+        this._registrations = new Map();
+      }
+
+      observe(target, options) {
+        if (!target) throw new TypeError('MutationObserver target is required');
+        const normalized = normalizeOptions(options);
+        if (!normalized.childList && !normalized.attributes && !normalized.characterData) {
+          throw new TypeError('MutationObserver options must enable childList, attributes, or characterData');
+        }
+        this._registrations.set(target, { target, options: normalized });
+        observers.add(this);
+        reconfigure();
+      }
+
+      disconnect() {
+        this._registrations.clear();
+        observers.delete(this);
+        reconfigure();
+      }
+
+      takeRecords() {
+        return [];
+      }
+    }
+
+    const hub = Object.freeze({
+      MutationObserver: MultiplexedMutationObserver,
+      activeObserverCount() { return observers.size; },
+      disconnectAll() {
+        for (const observer of [...observers]) observer._registrations.clear();
+        observers.clear();
+        if (nativeObserver) nativeObserver.disconnect();
+      }
+    });
+    hubs.set(documentLike, hub);
+    return hub;
+  }
+
+  function createWindowProxy(windowLike, documentLike) {
+    const hub = createHub(windowLike, documentLike);
+    if (typeof Proxy !== 'function') {
+      const fallback = Object.create(windowLike);
+      fallback.MutationObserver = hub.MutationObserver;
+      return fallback;
+    }
+
+    const bound = new Map();
+    return new Proxy(windowLike, {
+      get(target, property) {
+        if (property === 'MutationObserver') return hub.MutationObserver;
+        const value = Reflect.get(target, property, target);
+        if (typeof value !== 'function') return value;
+        if (!bound.has(property) || bound.get(property).source !== value) {
+          bound.set(property, { source: value, value: value.bind(target) });
+        }
+        return bound.get(property).value;
+      },
+      set(target, property, value) {
+        return Reflect.set(target, property, value, target);
+      },
+      has(target, property) {
+        if (property === 'MutationObserver') return true;
+        return property in target;
+      }
+    });
+  }
+
+  return Object.freeze({
+    createHub,
+    createWindowProxy
+  });
+}));
+
+/* ===== src/app-runtime.js ===== */
+
+/* --- app runtime source: src/app.js --- */
 (function (root, factory) {
   const api = factory();
   if (typeof module === 'object' && module.exports) module.exports = api;
@@ -2903,189 +3027,7 @@
   });
 }));
 
-/* ===== src/ui-core-v033.js ===== */
-(function (root, factory) {
-  const api = factory();
-  if (typeof module === 'object' && module.exports) module.exports = api;
-  if (root) root.R4G3UiCoreV033 = api;
-}(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  'use strict';
-
-  const SETTINGS_KEY = 'r4g3_property_rental_manager.v033';
-  const PRICING_BASES = Object.freeze(['lowest', 'median', 'average', 'highest']);
-  const SORT_MODES = Object.freeze([
-    'recommended', 'name-asc', 'name-desc', 'rent-desc', 'rent-asc',
-    'happy-desc', 'happy-asc', 'id-asc'
-  ]);
-  const DEFAULT_SETTINGS = Object.freeze({
-    pricingBasis: 'average',
-    undercutPercent: 0.5,
-    sortMode: 'recommended',
-    theme: 'dark',
-    density: 'comfortable',
-    showImages: true,
-    marketDetail: 'full',
-    settingsGeometry: Object.freeze({ left: 78, top: 110, width: 520, height: 620 })
-  });
-
-  function finite(value, fallback) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  }
-
-  function clamp(value, min, max, fallback) {
-    return Math.min(max, Math.max(min, finite(value, fallback)));
-  }
-
-  function normalizeGeometry(value) {
-    const source = value && typeof value === 'object' ? value : {};
-    return {
-      left: Math.round(clamp(source.left, 0, 10000, DEFAULT_SETTINGS.settingsGeometry.left)),
-      top: Math.round(clamp(source.top, 0, 10000, DEFAULT_SETTINGS.settingsGeometry.top)),
-      width: Math.round(clamp(source.width, 360, 1200, DEFAULT_SETTINGS.settingsGeometry.width)),
-      height: Math.round(clamp(source.height, 360, 1600, DEFAULT_SETTINGS.settingsGeometry.height))
-    };
-  }
-
-  function normalizeSettings(value, legacyUndercut, legacyTheme) {
-    const source = value && typeof value === 'object' ? value : {};
-    const fallbackUndercut = clamp(legacyUndercut, 0, 25, DEFAULT_SETTINGS.undercutPercent);
-    const fallbackTheme = legacyTheme === 'light' ? 'light' : DEFAULT_SETTINGS.theme;
-    return {
-      pricingBasis: PRICING_BASES.includes(source.pricingBasis) ? source.pricingBasis : DEFAULT_SETTINGS.pricingBasis,
-      undercutPercent: clamp(source.undercutPercent, 0, 25, fallbackUndercut),
-      sortMode: SORT_MODES.includes(source.sortMode) ? source.sortMode : DEFAULT_SETTINGS.sortMode,
-      theme: source.theme === 'light' || source.theme === 'dark' ? source.theme : fallbackTheme,
-      density: source.density === 'compact' ? 'compact' : DEFAULT_SETTINGS.density,
-      showImages: source.showImages !== false,
-      marketDetail: source.marketDetail === 'compact' ? 'compact' : DEFAULT_SETTINGS.marketDetail,
-      settingsGeometry: normalizeGeometry(source.settingsGeometry)
-    };
-  }
-
-  function loadSettings(storage, legacyUndercut, legacyTheme) {
-    if (!storage || typeof storage.getItem !== 'function') {
-      return normalizeSettings({}, legacyUndercut, legacyTheme);
-    }
-    try {
-      const raw = storage.getItem(SETTINGS_KEY);
-      return normalizeSettings(raw ? JSON.parse(raw) : {}, legacyUndercut, legacyTheme);
-    } catch (error) {
-      return normalizeSettings({}, legacyUndercut, legacyTheme);
-    }
-  }
-
-  function saveSettings(storage, next, legacyUndercut, legacyTheme) {
-    const current = loadSettings(storage, legacyUndercut, legacyTheme);
-    const source = next && typeof next === 'object' ? next : {};
-    const merged = Object.assign({}, current, source, {
-      settingsGeometry: source.settingsGeometry || current.settingsGeometry
-    });
-    const normalized = normalizeSettings(merged, legacyUndercut, legacyTheme);
-    if (storage && typeof storage.setItem === 'function') {
-      storage.setItem(SETTINGS_KEY, JSON.stringify(normalized));
-    }
-    return normalized;
-  }
-
-  function pricingBasisLabel(value) {
-    const labels = {
-      lowest: 'Lowest market price',
-      median: 'Median market price',
-      average: 'Average market price',
-      highest: 'Highest market price'
-    };
-    return labels[PRICING_BASES.includes(value) ? value : 'average'];
-  }
-
-  function statusGroup(entry, justListed) {
-    const property = entry && entry.property || {};
-    const id = Number(property.id);
-    if (justListed && typeof justListed.has === 'function' && justListed.has(id)) return 3;
-    const status = String(property.status || '').toLowerCase();
-    if (status === 'for_rent') return 2;
-    if (status === 'none') return 0;
-    return 1;
-  }
-
-  function nullableNumber(value, fallback) {
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : fallback;
-  }
-
-  function rowComparator(mode) {
-    return function compare(a, b) {
-      const ap = a && a.property || {};
-      const bp = b && b.property || {};
-      if (mode === 'name-desc') {
-        return String(bp.name || '').localeCompare(String(ap.name || '')) || Number(ap.id) - Number(bp.id);
-      }
-      if (mode === 'rent-desc') {
-        return nullableNumber(b && b.quote && b.quote.proposedTotal, -Infinity)
-          - nullableNumber(a && a.quote && a.quote.proposedTotal, -Infinity)
-          || String(ap.name || '').localeCompare(String(bp.name || ''))
-          || Number(ap.id) - Number(bp.id);
-      }
-      if (mode === 'rent-asc') {
-        return nullableNumber(a && a.quote && a.quote.proposedTotal, Infinity)
-          - nullableNumber(b && b.quote && b.quote.proposedTotal, Infinity)
-          || String(ap.name || '').localeCompare(String(bp.name || ''))
-          || Number(ap.id) - Number(bp.id);
-      }
-      if (mode === 'happy-desc') {
-        return nullableNumber(bp.happy, -Infinity) - nullableNumber(ap.happy, -Infinity)
-          || String(ap.name || '').localeCompare(String(bp.name || ''))
-          || Number(ap.id) - Number(bp.id);
-      }
-      if (mode === 'happy-asc') {
-        return nullableNumber(ap.happy, Infinity) - nullableNumber(bp.happy, Infinity)
-          || String(ap.name || '').localeCompare(String(bp.name || ''))
-          || Number(ap.id) - Number(bp.id);
-      }
-      if (mode === 'id-asc') return Number(ap.id) - Number(bp.id);
-      return String(ap.name || '').localeCompare(String(bp.name || '')) || Number(ap.id) - Number(bp.id);
-    };
-  }
-
-  function sortRows(rows, settings, justListed) {
-    const options = normalizeSettings(settings || {}, settings && settings.undercutPercent, settings && settings.theme);
-    const compareRows = rowComparator(options.sortMode);
-    return (Array.isArray(rows) ? rows : []).slice().sort((a, b) => {
-      const groupDifference = statusGroup(a, justListed) - statusGroup(b, justListed);
-      return groupDifference || compareRows(a, b);
-    });
-  }
-
-  function clampPanelPosition(geometry, viewport) {
-    const source = geometry && typeof geometry === 'object' ? geometry : {};
-    const view = viewport && typeof viewport === 'object' ? viewport : {};
-    const width = Math.max(1, finite(source.width, 360));
-    const height = Math.max(1, finite(source.height, 260));
-    const viewportWidth = Math.max(16, finite(view.width, width + 16));
-    const viewportHeight = Math.max(16, finite(view.height, height + 16));
-    const maxLeft = Math.max(8, viewportWidth - width - 8);
-    const maxTop = Math.max(8, viewportHeight - height - 8);
-    return {
-      left: Math.round(clamp(source.left, 8, maxLeft, 8)),
-      top: Math.round(clamp(source.top, 8, maxTop, 8))
-    };
-  }
-
-  return Object.freeze({
-    SETTINGS_KEY,
-    PRICING_BASES,
-    SORT_MODES,
-    DEFAULT_SETTINGS,
-    normalizeSettings,
-    loadSettings,
-    saveSettings,
-    pricingBasisLabel,
-    sortRows,
-    clampPanelPosition
-  });
-}));
-
-/* ===== src/app-v033.js ===== */
+/* --- app runtime source: src/app-v033.js --- */
 (function (root, factory) {
   const baseApp = typeof module === 'object' && module.exports ? require('./app') : root.R4G3PropertyRentalApp;
   const uiCore = typeof module === 'object' && module.exports ? require('./ui-core-v033') : root.R4G3UiCoreV033;
@@ -3862,120 +3804,7 @@
   }));
 }));
 
-/* ===== src/update-core-v034.js ===== */
-(function (root, factory) {
-  const api = factory();
-  if (typeof module === 'object' && module.exports) module.exports = api;
-  if (root) root.R4G3UpdateCoreV034 = api;
-}(typeof globalThis !== 'undefined' ? globalThis : this, function () {
-  'use strict';
-
-  const SETTINGS_KEY = 'r4g3_property_rental_manager.v034.updates';
-  const SNAPSHOT_KEY = 'r4g3_property_rental_manager.v034.snapshot';
-  const DEFAULT_SETTINGS = Object.freeze({ autoPageUpdate: false });
-
-  function normalizeSettings(value) {
-    const source = value && typeof value === 'object' ? value : {};
-    return { autoPageUpdate: source.autoPageUpdate === true };
-  }
-
-  function loadSettings(storage) {
-    if (!storage || typeof storage.getItem !== 'function') return normalizeSettings({});
-    try {
-      const raw = storage.getItem(SETTINGS_KEY);
-      return normalizeSettings(raw ? JSON.parse(raw) : {});
-    } catch (error) {
-      return normalizeSettings({});
-    }
-  }
-
-  function saveSettings(storage, next) {
-    const normalized = normalizeSettings(Object.assign({}, loadSettings(storage), next || {}));
-    if (storage && typeof storage.setItem === 'function') {
-      storage.setItem(SETTINGS_KEY, JSON.stringify(normalized));
-    }
-    return normalized;
-  }
-
-  function timestamp(value) {
-    const number = Number(value);
-    return Number.isFinite(number) && number > 0 ? Math.floor(number) : 0;
-  }
-
-  function normalizeTimestampMap(value) {
-    const source = value && typeof value === 'object' ? value : {};
-    const result = {};
-    for (const [key, raw] of Object.entries(source)) {
-      const id = Number(key);
-      const time = timestamp(raw);
-      if (Number.isInteger(id) && id > 0 && time) result[String(id)] = time;
-    }
-    return result;
-  }
-
-  function normalizeSnapshot(value) {
-    if (!value || typeof value !== 'object' || !Array.isArray(value.properties)) return null;
-    const markets = value.markets && typeof value.markets === 'object' && !Array.isArray(value.markets)
-      ? value.markets
-      : {};
-    const propertyMarkets = value.propertyMarkets && typeof value.propertyMarkets === 'object' && !Array.isArray(value.propertyMarkets)
-      ? value.propertyMarkets
-      : {};
-    const legacyUpdated = normalizeTimestampMap(value.propertyUpdatedAt);
-    const propertyCheckedAt = Object.prototype.hasOwnProperty.call(value, 'propertyCheckedAt')
-      ? normalizeTimestampMap(value.propertyCheckedAt)
-      : Object.assign({}, legacyUpdated);
-    const marketCheckedAt = Object.prototype.hasOwnProperty.call(value, 'marketCheckedAt')
-      ? normalizeTimestampMap(value.marketCheckedAt)
-      : Object.assign({}, legacyUpdated);
-    return {
-      properties: value.properties,
-      markets,
-      propertyMarkets,
-      updatedAt: timestamp(value.updatedAt),
-      propertyUpdatedAt: legacyUpdated,
-      propertyCheckedAt,
-      marketCheckedAt
-    };
-  }
-
-  function loadSnapshot(storage) {
-    if (!storage || typeof storage.getItem !== 'function') return null;
-    try {
-      const raw = storage.getItem(SNAPSHOT_KEY);
-      return raw ? normalizeSnapshot(JSON.parse(raw)) : null;
-    } catch (error) {
-      return null;
-    }
-  }
-
-  function saveSnapshot(storage, next) {
-    const normalized = normalizeSnapshot(next);
-    if (!normalized) return null;
-    if (storage && typeof storage.setItem === 'function') {
-      try {
-        storage.setItem(SNAPSHOT_KEY, JSON.stringify(normalized));
-      } catch (error) {
-        return normalized;
-      }
-    }
-    return normalized;
-  }
-
-  return Object.freeze({
-    SETTINGS_KEY,
-    SNAPSHOT_KEY,
-    DEFAULT_SETTINGS,
-    normalizeSettings,
-    loadSettings,
-    saveSettings,
-    normalizeSnapshot,
-    loadSnapshot,
-    saveSnapshot
-  });
-}));
-
-/* ===== src/app-v034.js ===== */
+/* --- app runtime source: src/app-v034.js --- */
 (function (root, factory) {
   const baseApp = typeof module === 'object' && module.exports ? require('./app-v033') : root.R4G3PropertyRentalApp;
   const updateCore = typeof module === 'object' && module.exports ? require('./update-core-v034') : root.R4G3UpdateCoreV034;
@@ -4583,7 +4412,7 @@
   }));
 }));
 
-/* ===== src/app-v036.js ===== */
+/* --- app runtime source: src/app-v036.js --- */
 (function (root, factory) {
   const baseApp = typeof module === 'object' && module.exports ? require('./app-v034') : root.R4G3PropertyRentalApp;
   const api = factory(baseApp);
@@ -4702,7 +4531,7 @@
   return Object.freeze(Object.assign({}, baseApp, { createController }));
 }));
 
-/* ===== src/app-v037.js ===== */
+/* --- app runtime source: src/app-v037.js --- */
 (function (root, factory) {
   const baseApp = typeof module === 'object' && module.exports ? require('./app-v036') : root.R4G3PropertyRentalApp;
   const api = factory(baseApp);
@@ -4908,7 +4737,7 @@
   }));
 }));
 
-/* ===== src/app-v038.js ===== */
+/* --- app runtime source: src/app-v038.js --- */
 (function (root, factory) {
   const baseApp = typeof module === 'object' && module.exports ? require('./app-v037') : root.R4G3PropertyRentalApp;
   const updateCore = typeof module === 'object' && module.exports ? require('./update-core-v034') : root.R4G3UpdateCoreV034;
@@ -5116,7 +4945,7 @@
   return Object.freeze(Object.assign({}, baseApp, { createController }));
 }));
 
-/* ===== src/app-v039.js ===== */
+/* --- app runtime source: src/app-v039.js --- */
 (function (root, factory) {
   const baseApp = typeof module === 'object' && module.exports ? require('./app-v038') : root.R4G3PropertyRentalApp;
   const api = factory(baseApp);
@@ -5277,7 +5106,7 @@
   }));
 }));
 
-/* ===== src/app-v0310.js ===== */
+/* --- app runtime source: src/app-v0310.js --- */
 (function (root, factory) {
   const baseApp = typeof module === 'object' && module.exports ? require('./app-v039') : root.R4G3PropertyRentalApp;
   const updateCore = typeof module === 'object' && module.exports ? require('./update-core-v034') : root.R4G3UpdateCoreV034;
@@ -5698,6 +5527,35 @@
 
   return Object.freeze(Object.assign({}, baseApp, { createController }));
 }));
+
+/* --- app runtime source: src/app-runtime.js --- */
+(function (root, factory) {
+  const baseApp = typeof module === 'object' && module.exports ? require('./app-v0310') : root.R4G3PropertyRentalApp;
+  const uiObserver = typeof module === 'object' && module.exports ? require('./ui-observer') : root.R4G3UiObserver;
+  const api = factory(baseApp, uiObserver);
+  if (typeof module === 'object' && module.exports) module.exports = api;
+  if (root) root.R4G3PropertyRentalApp = api;
+}(typeof globalThis !== 'undefined' ? globalThis : this, function (baseApp, uiObserver) {
+  'use strict';
+
+  if (!baseApp || typeof baseApp.createController !== 'function') throw new Error('Property Rental Manager app runtime is unavailable');
+  if (!uiObserver || typeof uiObserver.createWindowProxy !== 'function') throw new Error('Property Rental Manager UI observer runtime is unavailable');
+
+  function createController(options) {
+    const config = Object.assign({}, options || {});
+    if (config.window && config.document) {
+      config.window = uiObserver.createWindowProxy(config.window, config.document);
+    }
+    return baseApp.createController(config);
+  }
+
+  return Object.freeze(Object.assign({}, baseApp, {
+    RUNTIME_VERSION: '0.4.0',
+    OBSERVER_MODE: 'multiplexed',
+    createController
+  }));
+}));
+
 
 /* ===== src/bootstrap.js ===== */
 (function (root, factory) {

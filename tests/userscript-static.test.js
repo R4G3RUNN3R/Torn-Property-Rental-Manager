@@ -4,18 +4,18 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const build = require('../scripts/build-userscript');
 
 const root = path.resolve(__dirname, '..');
-const releasePath = path.join(root, 'R4G3RUNN3R-Property-Rental-Manager.user.js');
 
 function release() {
-  return fs.readFileSync(releasePath, 'utf8');
+  return build.buildText();
 }
 
-test('release userscript has narrow Torn properties metadata and v0.3.10 version', () => {
+test('release userscript has narrow Torn properties metadata and v0.4.0 version', () => {
   const source = release();
   assert.match(source, /@name\s+R4G3RUNN3R Property Rental Manager/);
-  assert.match(source, /@version\s+0\.3\.10/);
+  assert.match(source, /@version\s+0\.4\.0/);
   assert.match(source, /@match\s+https:\/\/www\.torn\.com\/properties\.php\*/);
   assert.match(source, /@connect\s+api\.torn\.com/);
   assert.match(source, /@grant\s+GM_xmlhttpRequest/);
@@ -176,8 +176,6 @@ test('release enforces shared 80 per minute and 750ms Torn API pacing', () => {
 });
 
 test('build script declares every shipped source module in deterministic order', () => {
-  const buildPath = path.join(root, 'scripts', 'build-userscript.js');
-  const source = fs.readFileSync(buildPath, 'utf8');
   const expected = [
     'src/property-core.js',
     'src/market-core.js',
@@ -186,23 +184,17 @@ test('build script declares every shipped source module in deterministic order',
     'src/form-core.js',
     'src/settings-core.js',
     'src/update-core.js',
-    'src/app.js',
-    'src/app-v033.js',
-    'src/app-v034.js',
-    'src/app-v036.js',
-    'src/app-v037.js',
-    'src/app-v038.js',
-    'src/app-v039.js',
-    'src/app-v0310.js',
+    'src/ui-observer.js',
+    'src/app-runtime.js',
     'src/bootstrap.js'
   ];
-  let last = -1;
-  for (const file of expected) {
-    const index = source.indexOf(file);
-    assert.ok(index > last, `${file} should appear in build order`);
-    last = index;
-  }
-  assert.doesNotMatch(source, /src\/api-core-v\d+/);
-  assert.doesNotMatch(source, /src\/ui-core-v\d+/);
-  assert.doesNotMatch(source, /src\/update-core-v\d+/);
+  assert.deepEqual(build.sourceFiles, expected);
+  assert.equal(build.sourceFiles.some(file => /^src\/app-v\d+\.js$/.test(file)), false);
+  assert.equal(build.sourceFiles.includes('src/app.js'), false);
+
+  const buildPath = path.join(root, 'scripts', 'build-userscript.js');
+  const source = fs.readFileSync(buildPath, 'utf8');
+  assert.doesNotMatch(source, /sourceFiles\s*=\s*\[[^\]]*src\/api-core-v\d+/s);
+  assert.doesNotMatch(source, /sourceFiles\s*=\s*\[[^\]]*src\/ui-core-v\d+/s);
+  assert.doesNotMatch(source, /sourceFiles\s*=\s*\[[^\]]*src\/update-core-v\d+/s);
 });

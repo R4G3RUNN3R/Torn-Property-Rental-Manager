@@ -11,20 +11,28 @@ const sourceFiles = [
   'src/property-core.js',
   'src/market-core.js',
   'src/api-core.js',
-  'src/api-core-v039.js',
   'src/draft-core.js',
   'src/form-core.js',
+  'src/settings-core.js',
+  'src/update-core.js',
+  'src/ui-observer.js',
+  'src/app-runtime.js',
+  'src/bootstrap.js'
+];
+
+// v0.4.0 ships the proven v0.3.10 behavior as one app-runtime block while the
+// versioned source files remain in-repo as regression fixtures during the migration.
+// They are not independent runtime modules anymore.
+const appRuntimeSources = [
   'src/app.js',
-  'src/ui-core-v033.js',
   'src/app-v033.js',
-  'src/update-core-v034.js',
   'src/app-v034.js',
   'src/app-v036.js',
   'src/app-v037.js',
   'src/app-v038.js',
   'src/app-v039.js',
   'src/app-v0310.js',
-  'src/bootstrap.js'
+  'src/app-runtime.js'
 ];
 
 function metadata() {
@@ -42,12 +50,21 @@ function metadata() {
 `;
 }
 
-function buildText() {
-  const modules = sourceFiles.map(file => {
-    const source = fs.readFileSync(path.join(root, file), 'utf8').trimEnd();
-    return `\n/* ===== ${file} ===== */\n${source}\n`;
-  }).join('');
+function readSource(file) {
+  return fs.readFileSync(path.join(root, file), 'utf8').trimEnd();
+}
 
+function appRuntimeText() {
+  return appRuntimeSources.map(file => `\n/* --- app runtime source: ${file} --- */\n${readSource(file)}\n`).join('');
+}
+
+function moduleText(file) {
+  if (file === 'src/app-runtime.js') return appRuntimeText();
+  return readSource(file);
+}
+
+function buildText() {
+  const modules = sourceFiles.map(file => `\n/* ===== ${file} ===== */\n${moduleText(file)}\n`).join('');
   return `${metadata()}${modules}\n/* ===== userscript start ===== */\nR4G3PropertyRentalBootstrap.start();\n`;
 }
 
@@ -68,4 +85,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = Object.freeze({ sourceFiles, buildText });
+module.exports = Object.freeze({ sourceFiles, appRuntimeSources, appRuntimeText, buildText });

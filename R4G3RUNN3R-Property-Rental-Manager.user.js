@@ -1850,6 +1850,7 @@
       characterDataOldValue: false
     };
     let attributeFilter = null;
+    let unrestrictedAttributes = false;
     let hasRegistration = false;
 
     for (const observer of observers) {
@@ -1861,16 +1862,23 @@
         merged.characterData = merged.characterData || options.characterData;
         merged.attributeOldValue = merged.attributeOldValue || options.attributeOldValue;
         merged.characterDataOldValue = merged.characterDataOldValue || options.characterDataOldValue;
-        if (options.attributeFilter && options.attributeFilter.length) {
-          if (attributeFilter === null) attributeFilter = new Set(options.attributeFilter);
-          else for (const name of options.attributeFilter) attributeFilter.add(name);
+
+        if (options.attributes) {
+          if (options.attributeFilter && options.attributeFilter.length) {
+            if (attributeFilter === null) attributeFilter = new Set(options.attributeFilter);
+            else for (const name of options.attributeFilter) attributeFilter.add(name);
+          } else {
+            unrestrictedAttributes = true;
+          }
         }
       }
     }
 
     if (!hasRegistration) return null;
     if (!merged.childList && !merged.attributes && !merged.characterData) merged.childList = true;
-    if (merged.attributes && attributeFilter && attributeFilter.size) merged.attributeFilter = [...attributeFilter];
+    if (merged.attributes && !unrestrictedAttributes && attributeFilter && attributeFilter.size) {
+      merged.attributeFilter = [...attributeFilter];
+    }
     return merged;
   }
 

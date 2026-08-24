@@ -184,8 +184,8 @@ test('build script declares every shipped source module in deterministic order',
     'src/api-core.js',
     'src/draft-core.js',
     'src/form-core.js',
+    'src/settings-core.js',
     'src/app.js',
-    'src/ui-core-v033.js',
     'src/app-v033.js',
     'src/update-core-v034.js',
     'src/app-v034.js',
@@ -203,4 +203,5 @@ test('build script declares every shipped source module in deterministic order',
     last = index;
   }
   assert.doesNotMatch(source, /src\/api-core-v\d+/);
+  assert.doesNotMatch(source, /src\/ui-core-v\d+/);
 });

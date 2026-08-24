@@ -40,7 +40,7 @@ All notable changes to Torn Property Rental Manager are recorded here.
 
 - Added v0.4.0 architecture regression tests.
 - Added a stable-runtime smoke test.
-- Added generated-release/lockfile synchronization for the feature branch.
+- Synchronized the generated userscript and package lockfile to version 0.4.0.
 - Added `docs/V0.4.0-MIGRATION.md` with deployment and rollback gates.
 
 ## [0.3.10]

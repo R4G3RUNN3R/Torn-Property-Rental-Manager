@@ -2,6 +2,7 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const { JSDOM } = require('jsdom');
 const build = require('../scripts/build-userscript');
 
 function optionalRequire(path) {
@@ -11,6 +12,36 @@ function optionalRequire(path) {
 const UiObserver = optionalRequire('../src/ui-observer');
 const AppRuntime = optionalRequire('../src/app-runtime');
 const LegacyApp = require('../src/app-v0310');
+const PropertyCore = require('../src/property-core');
+const MarketCore = require('../src/market-core');
+
+function memoryStorage() {
+  const map = new Map();
+  return {
+    getItem(key) { return map.has(key) ? map.get(key) : null; },
+    setItem(key, value) { map.set(key, String(value)); },
+    removeItem(key) { map.delete(key); }
+  };
+}
+
+function rawProperty(id = 101) {
+  return {
+    id,
+    owner: { id: 1 },
+    property: { id: 1, name: 'Apartment', happy: 100 },
+    happy: 100,
+    status: 'none',
+    modifications: []
+  };
+}
+
+function draftStore() {
+  return {
+    save() { return true; },
+    loadFor() { return null; },
+    clear() { return true; }
+  };
+}
 
 test('v0.4.0 build ships stable app runtime modules instead of versioned app files', () => {
   assert.ok(build.sourceFiles.includes('src/ui-observer.js'));
@@ -65,4 +96,46 @@ test('UI observer multiplexer gives app layers one native MutationObserver', () 
   first.disconnect();
   second.disconnect();
   assert.ok(disconnectCalls >= 1);
+});
+
+test('stable v0.4.0 runtime boots the real controller stack with one app-level native observer', async () => {
+  assert.ok(AppRuntime, 'stable app-runtime should exist');
+  const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'https://www.torn.com/properties.php' });
+  const RealMutationObserver = dom.window.MutationObserver;
+  let nativeConstructors = 0;
+
+  dom.window.MutationObserver = class CountingMutationObserver {
+    constructor(callback) {
+      nativeConstructors += 1;
+      this.inner = new RealMutationObserver(callback);
+    }
+    observe(target, options) { return this.inner.observe(target, options); }
+    disconnect() { return this.inner.disconnect(); }
+    takeRecords() { return this.inner.takeRecords(); }
+  };
+
+  const apiClient = {
+    async fetchCurrentUserId() { return 1; },
+    async fetchOwnedProperties() { return [rawProperty()]; },
+    async scanMarkets() { return {}; }
+  };
+
+  const controller = AppRuntime.createController({
+    window: dom.window,
+    document: dom.window.document,
+    storage: memoryStorage(),
+    apiClient,
+    propertyCore: PropertyCore,
+    marketCore: MarketCore,
+    draftStore: draftStore()
+  });
+
+  await controller.syncOwnedProperties();
+  const state = controller.getState();
+  assert.deepEqual(state.properties.map(property => property.id), [101]);
+  assert.ok(dom.window.document.getElementById('r4g3-prm-panel'));
+  assert.equal(nativeConstructors, 1, 'legacy UI layers must be multiplexed through one app-level native observer');
+
+  controller.destroy();
+  dom.window.close();
 });

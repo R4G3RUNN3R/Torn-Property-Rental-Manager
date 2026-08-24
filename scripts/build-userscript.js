@@ -11,7 +11,6 @@ const sourceFiles = [
   'src/property-core.js',
   'src/market-core.js',
   'src/api-core.js',
-  'src/api-core-v039.js',
   'src/draft-core.js',
   'src/form-core.js',
   'src/app.js',
